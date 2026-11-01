@@ -18,7 +18,8 @@
 # along with kirika. If not, see <https://www.gnu.org/licenses/>.
 
 GO := docker compose run --rm go
-LINT := docker compose run --rm lint
+# No TTY: pre-commit gives hooks no terminal on stdin, which older Compose versions do not detect.
+LINT := docker compose run --rm -T lint
 
 .PHONY: build clean fmt lint sh test vet
 
