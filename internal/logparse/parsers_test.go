@@ -25,6 +25,7 @@ import "testing"
 func TestByName(t *testing.T) {
 	for name, line := range map[string][]byte{
 		"caddy-json": caddyRequest(`"host":"example.com"`),
+		"ncsa":       []byte(`192.0.2.1 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 1`),
 	} {
 		p, err := ByName(name)
 		if err != nil {
@@ -36,7 +37,7 @@ func TestByName(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"", "CADDY-JSON", "unknown"} {
+	for _, name := range []string{"", "CADDY-JSON", "NCSA", "unknown"} {
 		if _, err := ByName(name); err == nil {
 			t.Errorf("ByName(%q): want error, got nil", name)
 		}

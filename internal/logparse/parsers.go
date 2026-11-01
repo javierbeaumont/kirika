@@ -29,6 +29,8 @@ func ByName(name string) (Parser, error) {
 	switch name {
 	case "caddy-json":
 		return ParseCaddyJSON, nil
+	case "ncsa":
+		return ParseNCSA, nil
 	default:
 		return nil, fmt.Errorf("logparse: unknown format %q", name)
 	}
