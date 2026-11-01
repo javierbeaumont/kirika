@@ -18,18 +18,29 @@
 # along with kirika. If not, see <https://www.gnu.org/licenses/>.
 
 GO := docker compose run --rm go
+LINT := docker compose run --rm lint
 
-.PHONY: build clean fmt sh
+.PHONY: build clean fmt lint sh test vet
 
 build:
 	$(GO) go build ./...
 
-# Also removes the Go module and build caches.
+# Also removes the caches.
 clean:
 	docker compose down -v
 
 fmt:
-	$(GO) gofmt -w .
+	$(LINT) golangci-lint fmt
+
+# Applies the fixes the linters can make.
+lint:
+	$(LINT) golangci-lint run --fix
 
 sh:
 	$(GO) sh
+
+test:
+	$(GO) go test ./...
+
+vet:
+	$(GO) go vet ./...

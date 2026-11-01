@@ -8,9 +8,16 @@ insert_final_newline = true
 max_line_length = 120
 trim_trailing_whitespace = true
 
+[*.go]
+indent_style = tab
+
 [*.{yml,yaml}]
 indent_size = 2
 
 # Recipes must be tab-indented.
 [Makefile]
 indent_style = tab
+
+# Log lines as the servers write them.
+[internal/logparse/testdata/*]
+max_line_length = off

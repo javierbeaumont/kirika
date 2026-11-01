@@ -1,0 +1,13 @@
+version: "2"
+
+formatters:
+  enable:
+    - gofumpt
+
+linters:
+  enable:
+    - lll
+    - wsl_v5
+  settings:
+    lll:
+      tab-width: 4
