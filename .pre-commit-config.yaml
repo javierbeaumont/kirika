@@ -26,6 +26,10 @@ repos:
         name: insert-license (shell/Make)
         files: '\.sh$|(^|/)Makefile$'
         args: [--license-filepath=tools/license-header.txt, --comment-style=#]
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
   - repo: https://github.com/codespell-project/codespell
     rev: v2.4.3
     hooks:

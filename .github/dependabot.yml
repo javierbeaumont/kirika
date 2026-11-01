@@ -14,6 +14,19 @@ updates:
     schedule:
       interval: monthly
 
+  - package-ecosystem: github-actions
+    directory: /
+    commit-message:
+      prefix: ci
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns:
+          - "*"
+    schedule:
+      interval: monthly
+
   - package-ecosystem: pre-commit
     directory: /
     commit-message:
