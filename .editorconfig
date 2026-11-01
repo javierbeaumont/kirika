@@ -10,3 +10,7 @@ trim_trailing_whitespace = true
 
 [*.{yml,yaml}]
 indent_size = 2
+
+# Recipes must be tab-indented.
+[Makefile]
+indent_style = tab

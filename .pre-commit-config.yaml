@@ -19,6 +19,13 @@ repos:
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: trailing-whitespace
+  - repo: https://github.com/Lucas-C/pre-commit-hooks
+    rev: v1.5.6
+    hooks:
+      - id: insert-license
+        name: insert-license (shell/Make)
+        files: '\.sh$|(^|/)Makefile$'
+        args: [--license-filepath=tools/license-header.txt, --comment-style=#]
   - repo: https://github.com/codespell-project/codespell
     rev: v2.4.3
     hooks:
