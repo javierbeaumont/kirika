@@ -48,9 +48,10 @@ type caddyLine struct {
 		URI      string              `json:"uri"`
 	} `json:"request"`
 
-	Size   int64   `json:"size"`
-	Status int     `json:"status"`
-	Ts     float64 `json:"ts"`
+	RespHeaders map[string][]string `json:"resp_headers"`
+	Size        int64               `json:"size"`
+	Status      int                 `json:"status"`
+	Ts          float64             `json:"ts"`
 }
 
 // ParseCaddyJSON parses a single Caddy JSON access-log line into an Event. It returns ErrNotAccessLog for well-formed
@@ -76,6 +77,7 @@ func ParseCaddyJSON(line []byte) (Event, error) {
 
 	ev := Event{
 		ClientIP:  clientAddr(clientIP),
+		FirstPart: firstPart(headerFirst(c.RespHeaders, "Content-Range"), headerFirst(c.Request.Headers, "Range")),
 		Host:      vhost(c.Request.Host),
 		Method:    c.Request.Method,
 		Path:      unreserved(stripQuery(c.Request.URI)),
@@ -92,6 +94,16 @@ func ParseCaddyJSON(line []byte) (Event, error) {
 	}
 
 	return ev, nil
+}
+
+// Reports whether a range starts at byte 0: the one a Content-Range response header sent ("bytes 0-99/100") or, without
+// it, the first one a Range request header asked for ("bytes=0-99"). A range unit ignores case.
+func firstPart(sent, asked string) bool {
+	if sent != "" {
+		return strings.HasPrefix(strings.ToLower(sent), "bytes 0-")
+	}
+
+	return strings.HasPrefix(strings.ToLower(asked), "bytes=0-")
 }
 
 // Returns the first value of a header, matching its name in any case. When several spellings carry values, the one that

@@ -177,6 +177,67 @@ func TestParseCaddyJSONHeaders(t *testing.T) {
 	}
 }
 
+// Checks where a range starts, from the response's Content-Range or else the request's Range.
+func TestParseCaddyJSONFirstPart(t *testing.T) {
+	for _, tc := range []struct {
+		req, resp string
+		want      bool
+	}{
+		{`{}`, `{}`, false},
+		{`{}`, `{"Content-Range":["bytes 0-99/100"]}`, true},
+		{`{}`, `{"content-range":["Bytes 0-99/100"]}`, true},
+		{`{}`, `{"Content-Range":["bytes 50-99/100"]}`, false},
+		{`{}`, `{"Content-Range":["bytes 05-99/100"]}`, false},
+		{`{}`, `{"Content-Range":["bytes */100"]}`, false},
+		{`{"Range":["bytes=0-"]}`, `{}`, true},
+		{`{"range":["Bytes=0-9,20-29"]}`, `{}`, true},
+		{`{"Range":["bytes=50-"]}`, `{}`, false},
+		{`{"Range":["bytes=05-"]}`, `{}`, false},
+		{`{"Range":["bytes=-50"]}`, `{}`, false},
+		{`{"Range":["bytes=0-"]}`, `{"Content-Range":["bytes 50-99/100"]}`, false},
+	} {
+		line := fmt.Sprintf(`{"ts":946684800,"request":{"method":"GET","uri":"/","headers":%s},"resp_headers":%s,`+
+			`"status":206,"size":1}`, tc.req, tc.resp)
+
+		got, err := ParseCaddyJSON([]byte(line))
+		if err != nil {
+			t.Fatalf("%s %s: parse: %v", tc.req, tc.resp, err)
+		}
+
+		if got.FirstPart != tc.want {
+			t.Errorf("%s %s: FirstPart = %v, want %v", tc.req, tc.resp, got.FirstPart, tc.want)
+		}
+	}
+}
+
+// Parses real Caddy lines of a file served from byte 0 and from its middle (testdata/caddy_ranges.jsonl).
+func TestParseCaddyJSONRangeFixture(t *testing.T) {
+	raw, err := os.ReadFile("testdata/caddy_ranges.jsonl")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	lines := bytes.Split(bytes.TrimSpace(raw), []byte("\n"))
+	if len(lines) != 2 {
+		t.Fatalf("fixture: got %d lines, want 2", len(lines))
+	}
+
+	for i, want := range []struct {
+		first bool
+		size  int64
+	}{{true, 100000}, {false, 10000}} {
+		ev, err := ParseCaddyJSON(lines[i])
+		if err != nil {
+			t.Fatalf("line %d: %v", i, err)
+		}
+
+		if ev.Status != 206 || ev.FirstPart != want.first || ev.Size != want.size {
+			t.Errorf("line %d: Status, FirstPart, Size = %d, %v, %d; want 206, %v, %d", i, ev.Status, ev.FirstPart,
+				ev.Size, want.first, want.size)
+		}
+	}
+}
+
 func TestParseCaddyJSONHost(t *testing.T) {
 	for _, tc := range []struct{ host, want string }{
 		{"", ""},

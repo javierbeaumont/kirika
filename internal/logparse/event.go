@@ -31,6 +31,7 @@ import (
 // Event is one normalized access-log record. Fields kirika does not use are dropped.
 type Event struct {
 	ClientIP  string    // client address, without a port
+	FirstPart bool      // a partial response known to start at byte 0
 	Host      string    // vhost, without port 80 or 443 (e.g. "example.com", "example.com:8080")
 	Method    string    // HTTP method (GET, POST, ...)
 	Path      string    // URI without its query string, with unreserved characters decoded
