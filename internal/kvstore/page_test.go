@@ -90,12 +90,48 @@ func TestIsPageList(t *testing.T) {
 	}
 }
 
+// A path folds only when it ends in "/" and an index page, in the same case.
+func TestFold(t *testing.T) {
+	suffixes := []string{"/index.html", "/index.php"}
+
+	for path, want := range map[string]string{
+		"/index.html":     "/",
+		"/blog/index.php": "/blog/",
+		"/blog/":          "/blog/",
+		"/INDEX.HTML":     "/INDEX.HTML",
+		"/myindex.html":   "/myindex.html",
+		"/index.html/":    "/index.html/",
+		"index.html":      "index.html",
+	} {
+		if got := fold(path, suffixes); got != want {
+			t.Errorf("fold(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// A string is cut at the first of the separators, and kept whole without any.
+func TestCutQuery(t *testing.T) {
+	for _, tc := range []struct{ s, seps, want string }{
+		{"/a?q", "?", "/a"},
+		{"/a;s?q", "?;", "/a"},
+		{"/a?q;s", "?;", "/a"},
+		{"/a;s", "?", "/a;s"},
+		{"/a", "?;", "/a"},
+		{"?q", "?", ""},
+	} {
+		if got := cutQuery(tc.s, tc.seps); got != tc.want {
+			t.Errorf("cutQuery(%q, %q) = %q, want %q", tc.s, tc.seps, got, tc.want)
+		}
+	}
+}
+
 func TestDefaultOptions(t *testing.T) {
 	o := DefaultOptions()
+	o.IndexPages[0] = "x"
 	o.NotPages[0] = "html"
 	o.ValidCodes[0] = 0
 
-	if d := DefaultOptions(); d.NotPages[0] == "html" || d.ValidCodes[0] == 0 {
+	if d := DefaultOptions(); d.IndexPages[0] == "x" || d.NotPages[0] == "html" || d.ValidCodes[0] == 0 {
 		t.Errorf("a change to the returned options reached the defaults: %+v", d)
 	}
 }

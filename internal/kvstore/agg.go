@@ -53,13 +53,16 @@ var errBadPeriod = errors.New("kvstore: invalid period, want YYYY, YYYY-MM or YY
 
 // Options are the counting rules of a batch.
 type Options struct {
-	NotPages   []string // extensions never counted as pages, besides the image and download types
-	ValidCodes []int    // the status codes of a correct request
+	IndexPages      []string // file names of a directory's index page
+	NotPages        []string // extensions never counted as pages, besides the image and download types
+	QuerySeparators string   // characters besides "?" that start the query of a path or a referrer
+	ValidCodes      []int    // the status codes of a correct request
 }
 
 // DefaultOptions returns the counting rules kirika uses unless told otherwise.
 func DefaultOptions() Options {
 	return Options{
+		IndexPages: slices.Clone(defaultIndexPages),
 		NotPages:   slices.Clone(defaultNotPages),
 		ValidCodes: []int{http.StatusOK, http.StatusPartialContent, http.StatusNotModified},
 	}
@@ -68,7 +71,9 @@ func DefaultOptions() Options {
 // Batch holds in memory what applied events add, until DB.Flush writes it in one transaction.
 type Batch struct {
 	d       map[string]tally
+	index   []string // "/" and an index page name each
 	notPage map[string]bool
+	query   string // "?", which starts a query (RFC 3986, section 3.4), and the query separators
 	valid   map[int]bool
 }
 
@@ -80,7 +85,17 @@ type TimePoint struct {
 
 // NewBatch returns an empty batch that counts by the rules of o.
 func NewBatch(o Options) *Batch {
-	b := &Batch{d: map[string]tally{}, notPage: setOf(o.NotPages...), valid: map[int]bool{}}
+	b := &Batch{
+		d:       map[string]tally{},
+		notPage: setOf(o.NotPages...),
+		query:   "?" + o.QuerySeparators,
+		valid:   map[int]bool{},
+	}
+
+	for _, name := range o.IndexPages {
+		b.index = append(b.index, "/"+name)
+	}
+
 	for _, code := range o.ValidCodes {
 		b.valid[code] = true
 	}
@@ -90,12 +105,14 @@ func NewBatch(o Options) *Batch {
 
 // Apply counts one event in its class: in its hour, its day and each dimension of hostKey(ev.Host). It adds a hit, a
 // page if the path is one, and its size as bandwidth. A 206 that does not start at byte 0 adds its size but no hit. A
-// missing status or referrer adds nothing there.
+// path and a referrer count without their query, and an index page under its directory. A missing status or referrer
+// adds nothing there.
 func (b *Batch) Apply(ev logparse.Event) {
 	host := hostKey(ev.Host)
+	path := cutQuery(ev.Path, b.query)
 
 	client := uaclass.Classify(ev.UserAgent)
-	if robotsTxt(ev.Path) {
+	if robotsTxt(path) {
 		client = uaclass.Bot
 	}
 
@@ -106,23 +123,24 @@ func (b *Batch) Apply(ev logparse.Event) {
 		c.Hits = 1
 	}
 
-	if isPage(ev.Path, b.notPage) {
+	if isPage(path, b.notPage) {
 		c.Pages, c.PageBandwidth = c.Hits, ev.Size
+		path = fold(path, b.index)
 	}
 
 	b.add(timeKey(tagHour, host, ev.Time.Format("2006010215")), cl, c)
 	b.add(timeKey(tagDay, host, ev.Time.Format("20060102")), cl, c)
 
 	ym := ev.Time.Format("200601")
-	b.add(dimKey(tagURL, host, ym, clip(ev.Path)), cl, c)
+	b.add(dimKey(tagURL, host, ym, clip(path)), cl, c)
 	b.add(dimKey(tagCli, host, ym, client), cl, c)
 
 	if ev.Status != 0 {
 		b.add(dimKey(tagStat, host, ym, strconv.Itoa(ev.Status)), cl, c)
 	}
 
-	if ev.Referer != "" {
-		b.add(dimKey(tagRef, host, ym, clip(ev.Referer)), cl, c)
+	if ref := cutQuery(ev.Referer, b.query); ref != "" {
+		b.add(dimKey(tagRef, host, ym, clip(ref)), cl, c)
 	}
 }
 

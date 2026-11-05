@@ -21,6 +21,10 @@ package kvstore
 
 import "strings"
 
+// The default file names of an index page. The list is the DefaultFile of AWStats' sample configuration:
+// https://github.com/eldy/AWStats/blob/AWSTATS_8_0/wwwroot/cgi-bin/awstats.model.conf#L465-L470
+var defaultIndexPages = []string{"index.html", "index.php"}
+
 // The default extensions that are never pages: styles, scripts, fonts, feeds, applets and images. The list is AWStats'
 // default NotPageList: https://github.com/eldy/AWStats/blob/AWSTATS_8_0/wwwroot/cgi-bin/awstats.pl#L1849-L1868
 var defaultNotPages = []string{
@@ -47,6 +51,26 @@ func isPage(path string, notPage map[string]bool) bool {
 	ext := extension(path)
 
 	return ext == "" || !notPage[ext] && !fileTypes[ext]
+}
+
+// Returns path cut to its directory when it ends in one of suffixes, "/" and an index page name each.
+func fold(path string, suffixes []string) string {
+	for _, s := range suffixes {
+		if strings.HasSuffix(path, s) {
+			return path[:len(path)-len(s)+1]
+		}
+	}
+
+	return path
+}
+
+// Returns s up to its query, which starts at the first of seps.
+func cutQuery(s, seps string) string {
+	if i := strings.IndexAny(s, seps); i >= 0 {
+		return s[:i]
+	}
+
+	return s
 }
 
 // Returns the extension of a path in lowercase: the 1 to 6 letters, digits or underscores after its last dot. Anything

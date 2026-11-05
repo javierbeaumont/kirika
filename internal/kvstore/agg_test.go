@@ -314,6 +314,112 @@ func TestValidCodes(t *testing.T) {
 	}
 }
 
+// An index page counts under its directory, with the default index pages or others, and a file never does.
+func TestIndexPages(t *testing.T) {
+	db := openStore(t)
+	flush(t, db,
+		page("h", "/", 200, 1, base),
+		page("h", "/index.html", 200, 1, base),
+		page("h", "/blog/index.php", 200, 1, base),
+		page("h", "/myindex.html", 200, 1, base),
+	)
+
+	want := map[string]Counts{"/": pageCounts(2, 2), "/blog/": pageCounts(1, 1), "/myindex.html": pageCounts(1, 1)}
+	if got := dim(t, db, "h", tagURL, "2000", Filter{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("Dim with the default index pages = %+v, want %+v", got, want)
+	}
+
+	b := NewBatch(Options{IndexPages: []string{"default.htm", "index.png"}, ValidCodes: []int{200}})
+	for _, path := range []string{"/default.htm", "/index.html", "/index.png"} {
+		b.Apply(page("o", path, 200, 1, base))
+	}
+
+	if err := db.Flush(b); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	want = map[string]Counts{
+		"/":           pageCounts(1, 1),
+		"/index.html": pageCounts(1, 1),
+		"/index.png":  {HitBandwidth: 1, Hits: 1},
+	}
+	if got := dim(t, db, "o", tagURL, "2000", Filter{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("Dim with default.htm and index.png = %+v, want %+v", got, want)
+	}
+}
+
+// A referrer counts without its query, and not at all when nothing else is left.
+func TestReferrerQuery(t *testing.T) {
+	db := openStore(t)
+
+	var evs []logparse.Event
+
+	for _, ref := range []string{"https://r.example/p?q=1", "https://r.example/p", "?q=1"} {
+		ev := page("h", "/", 200, 1, base)
+		ev.Referer = ref
+		evs = append(evs, ev)
+	}
+
+	flush(t, db, evs...)
+
+	want := map[string]Counts{"https://r.example/p": pageCounts(2, 2)}
+	if got := dim(t, db, "h", tagRef, "2000", Filter{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("Dim of referrers = %+v, want %+v", got, want)
+	}
+}
+
+// A query starts only at "?" by default, and also at an added separator. A path loses its query before it is told a
+// page, an index page or robots.txt.
+func TestQuerySeparators(t *testing.T) {
+	db := openStore(t)
+	ev := page("h", "/app;s=1", 200, 1, base)
+	ev.Referer = "https://r.example/p;s=1"
+	flush(t, db, ev)
+
+	want := map[string]Counts{"/app;s=1": pageCounts(1, 1)}
+	if got := dim(t, db, "h", tagURL, "2000", Filter{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("Dim of paths by default = %+v, want %+v", got, want)
+	}
+
+	want = map[string]Counts{"https://r.example/p;s=1": pageCounts(1, 1)}
+	if got := dim(t, db, "h", tagRef, "2000", Filter{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("Dim of referrers by default = %+v, want %+v", got, want)
+	}
+
+	b := NewBatch(Options{IndexPages: []string{"index.html"}, QuerySeparators: ";", ValidCodes: []int{200}})
+
+	for _, path := range []string{"/app;s=1", "/index.html;s=1", "/logo.png;v=2", "/robots.txt;s=1"} {
+		ev := page("o", path, 200, 1, base)
+		ev.Referer = "https://r.example/p;s=1"
+		b.Apply(ev)
+	}
+
+	if err := db.Flush(b); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	all := Filter{Audience: AllAudiences}
+	want = map[string]Counts{
+		"/":           pageCounts(1, 1),
+		"/app":        pageCounts(1, 1),
+		"/logo.png":   {HitBandwidth: 1, Hits: 1},
+		"/robots.txt": {HitBandwidth: 1, Hits: 1},
+	}
+
+	if got := dim(t, db, "o", tagURL, "2000", all); !reflect.DeepEqual(got, want) {
+		t.Errorf("Dim of paths with ; = %+v, want %+v", got, want)
+	}
+
+	if got := dim(t, db, "o", tagCli, "2000", all)["bot"].Hits; got != 1 {
+		t.Errorf("bot hits with ; = %d, want 1 for robots.txt", got)
+	}
+
+	want = map[string]Counts{"https://r.example/p": {HitBandwidth: 4, Hits: 4, PageBandwidth: 2, Pages: 2}}
+	if got := dim(t, db, "o", tagRef, "2000", all); !reflect.DeepEqual(got, want) {
+		t.Errorf("Dim of referrers with ; = %+v, want %+v", got, want)
+	}
+}
+
 // Every read counts only what its filter picks, and leaves out a bucket or a value it picks nothing of.
 func TestFilters(t *testing.T) {
 	db := openStore(t)
