@@ -31,7 +31,7 @@ import (
 	berrors "go.etcd.io/bbolt/errors"
 )
 
-// setSchema writes a raw schema version into the store at path.
+// Writes a raw schema version into the store at path.
 func setSchema(t *testing.T, path string, v []byte) {
 	t.Helper()
 
@@ -52,7 +52,7 @@ func setSchema(t *testing.T, path string, v []byte) {
 	}
 }
 
-// closeStore closes db, failing the test on error.
+// Closes db, failing the test on error.
 func closeStore(t *testing.T, db *DB) {
 	t.Helper()
 
@@ -61,7 +61,7 @@ func closeStore(t *testing.T, db *DB) {
 	}
 }
 
-// storePath returns the path of a store created and closed in a fresh directory.
+// Returns the path of a store created and closed in a fresh directory.
 func storePath(t *testing.T) string {
 	t.Helper()
 
@@ -97,6 +97,10 @@ func TestOpen(t *testing.T) {
 	defer closeStore(t, db)
 
 	err = db.b.View(func(tx *bolt.Tx) error {
+		if tx.Bucket(bktAgg) == nil {
+			t.Error("no agg bucket")
+		}
+
 		if v := tx.Bucket(bktMeta).Get(metaSchema); !bytes.Equal(v, []byte{schemaVersion}) {
 			t.Errorf("schema = %x, want %x", v, schemaVersion)
 		}
@@ -145,7 +149,7 @@ func TestOpenLocked(t *testing.T) {
 	closeStore(t, db)
 }
 
-// TestOpenSchema refuses each bad stored version with its error, and a refused store releases its lock.
+// Each bad stored version is refused with its error, and a refused store releases its lock.
 func TestOpenSchema(t *testing.T) {
 	for _, tc := range []struct {
 		v    []byte

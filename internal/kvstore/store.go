@@ -29,10 +29,11 @@ import (
 	berrors "go.etcd.io/bbolt/errors"
 )
 
-// schemaVersion is the store format this build writes.
+// The store format this build writes.
 const schemaVersion = 1
 
 var (
+	bktAgg     = []byte("agg")
 	bktMeta    = []byte("meta")
 	metaSchema = []byte("schema")
 )
@@ -75,9 +76,13 @@ func (db *DB) Close() error {
 	return db.b.Close()
 }
 
-// init creates the meta bucket and writes the schema version, or checks the stored one.
+// Creates the buckets and writes the schema version, or checks the stored one.
 func (db *DB) init() error {
 	return db.b.Update(func(tx *bolt.Tx) error {
+		if _, err := tx.CreateBucketIfNotExists(bktAgg); err != nil {
+			return err
+		}
+
 		meta, err := tx.CreateBucketIfNotExists(bktMeta)
 		if err != nil {
 			return err
