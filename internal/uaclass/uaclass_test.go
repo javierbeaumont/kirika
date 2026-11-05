@@ -26,8 +26,8 @@ import (
 
 func TestClassify(t *testing.T) {
 	for _, tc := range []struct{ ua, want string }{
-		{"", Desktop},
-		{"   ", Desktop},
+		{"", Bot},
+		{" \t", Bot},
 		{"CURL/8.7.1", Bot},
 		{"Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", Bot},
 		{"Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 " +
@@ -49,8 +49,7 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// TestClassifyMarkers checks that every marker, in any case, decides its kind on its own, and that a bot marker wins
-// over every mobile one.
+// Every marker, in any case, decides its kind on its own, and a bot marker wins over every mobile one.
 func TestClassifyMarkers(t *testing.T) {
 	for kind, markers := range map[string][]string{Bot: botMarkers, Mobile: mobileMarkers} {
 		for _, m := range markers {
@@ -69,7 +68,7 @@ func TestClassifyMarkers(t *testing.T) {
 	}
 }
 
-// TestMarkerLists keeps each list lowercase, sorted and free of duplicates.
+// Each list stays lowercase, sorted and free of duplicates.
 func TestMarkerLists(t *testing.T) {
 	for name, markers := range map[string][]string{"botMarkers": botMarkers, "mobileMarkers": mobileMarkers} {
 		for i, m := range markers {

@@ -29,24 +29,25 @@ const (
 	Mobile  = "mobile"
 )
 
-// botMarkers are substrings common to crawlers and automated clients.
+// Substrings common to crawlers and automated clients.
 var botMarkers = []string{
 	"bingpreview", "bot", "crawl", "curl", "facebookexternalhit", "feedfetcher", "go-http-client", "httpclient",
 	"libwww", "mediapartners", "monitor", "python-requests", "scrapy", "slurp", "spider", "wget",
 }
 
-// mobileMarkers are substrings common to handheld devices.
+// Substrings common to handheld devices.
 var mobileMarkers = []string{
 	"android", "bb10", "blackberry", "ipad", "iphone", "ipod", "kaios", "mobi", "opera mini", "windows phone",
 }
 
-// Classify returns the client kind of a User-Agent string, ignoring case. Bot markers win over mobile ones, as crawlers
-// can announce a phone; a string with neither, empty included, is Desktop.
+// Classify returns the client kind of a User-Agent string, ignoring case. A blank string is Bot, since every browser
+// sends a User-Agent. Bot markers win over mobile ones, as crawlers can announce a phone; a string with neither is
+// Desktop.
 func Classify(ua string) string {
 	s := strings.ToLower(ua)
 
 	switch {
-	case containsAny(s, botMarkers):
+	case strings.TrimSpace(s) == "" || containsAny(s, botMarkers):
 		return Bot
 	case containsAny(s, mobileMarkers):
 		return Mobile
