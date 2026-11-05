@@ -22,8 +22,8 @@ and be versioned, so that each update is a reviewable step.
 A substring heuristic for now, and a maintained library once kirika shows browsers, operating systems or named robots.
 The ADR that picks the library supersedes this one and decides whether the markers stay as a fallback.
 
-`internal/uaclass` lowercases the string and looks for substring markers: bot markers first, as crawlers can announce a
-phone, then mobile ones. Anything else, an empty string included, is desktop. The marker lists live in the package.
+The heuristic looks for substring markers in the User-Agent, in any case: bot markers first, as crawlers can announce a
+phone, then mobile ones.
 
 ## Consequences
 
