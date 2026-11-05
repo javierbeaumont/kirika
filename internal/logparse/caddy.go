@@ -24,19 +24,19 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// maxTs is the first Unix second of year 10000, past the years Event allows.
+// The first Unix second of year 10000, past the years Event allows.
 const maxTs = 253402300800
 
 // ErrNotAccessLog is returned when a line is valid JSON but not a Caddy access entry (for example a server-startup log
 // line in a mixed log stream).
 var ErrNotAccessLog = errors.New("logparse: not a caddy access-log entry")
 
-// caddyLine mirrors the subset of Caddy's JSON access-log schema that kirika consumes. Unknown fields are ignored by
-// encoding/json.
+// The subset of Caddy's JSON access-log schema that kirika consumes. Unknown fields are ignored by encoding/json.
 type caddyLine struct {
 	Request struct {
 		ClientIP string              `json:"client_ip"`
@@ -75,10 +75,10 @@ func ParseCaddyJSON(line []byte) (Event, error) {
 	}
 
 	ev := Event{
-		ClientIP:  clientIP,
-		Host:      stripPort(c.Request.Host),
+		ClientIP:  clientAddr(clientIP),
+		Host:      vhost(c.Request.Host),
 		Method:    c.Request.Method,
-		Path:      stripQuery(c.Request.URI),
+		Path:      unreserved(stripQuery(c.Request.URI)),
 		Proto:     c.Request.Proto,
 		Referer:   headerFirst(c.Request.Headers, "Referer"),
 		Size:      c.Size,
@@ -94,8 +94,8 @@ func ParseCaddyJSON(line []byte) (Event, error) {
 	return ev, nil
 }
 
-// headerFirst returns the first value of a header, matching its name in any case. When several spellings carry values,
-// the one that sorts first wins, so the result does not depend on map order.
+// Returns the first value of a header, matching its name in any case. When several spellings carry values, the one that
+// sorts first wins, so the result does not depend on map order.
 func headerFirst(h map[string][]string, name string) string {
 	key := ""
 
@@ -112,21 +112,28 @@ func headerFirst(h map[string][]string, name string) string {
 	return h[key][0]
 }
 
-// stripPort returns the bare hostname of a Host header: without its ":port" suffix, and an IPv6 address without its
-// brackets.
-func stripPort(host string) string {
-	if h, _, err := net.SplitHostPort(host); err == nil {
+// Returns a Host header without the default port of either scheme, 80 or 443, or an empty one. Any other port stays,
+// since it usually serves another site, and a valid one loses its leading zeros. An IPv6 address without a port loses
+// its brackets.
+func vhost(host string) string {
+	h, port, err := net.SplitHostPort(host)
+	if err != nil {
+		return unbracket(host)
+	}
+
+	n, err := strconv.ParseUint(port, 10, 16)
+
+	switch {
+	case port == "" || err == nil && (n == 80 || n == 443):
 		return h
+	case err == nil:
+		return net.JoinHostPort(h, strconv.FormatUint(n, 10))
+	default:
+		return host
 	}
-
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		return host[1 : len(host)-1]
-	}
-
-	return host
 }
 
-// stripQuery returns the request target with any "?query" removed.
+// Returns the request target with any "?query" removed.
 func stripQuery(uri string) string {
 	if i := strings.IndexByte(uri, '?'); i >= 0 {
 		return uri[:i]
@@ -135,7 +142,7 @@ func stripQuery(uri string) string {
 	return uri
 }
 
-// unixFloat converts Caddy's fractional-seconds timestamp to a UTC time.
+// Converts Caddy's fractional-seconds timestamp to a UTC time.
 func unixFloat(ts float64) time.Time {
 	sec := int64(ts)
 	nsec := int64((ts - float64(sec)) * 1e9)

@@ -26,7 +26,7 @@ import (
 	"time"
 )
 
-// ncsaTime is the NCSA/CLF timestamp layout, e.g. 03/Jul/2026:13:55:36 +0000.
+// The NCSA/CLF timestamp layout, e.g. 01/Jan/2000:00:00:00 +0000.
 const ncsaTime = "02/Jan/2006:15:04:05 -0700"
 
 // ParseNCSA parses one line of NCSA Common or Combined Log Format, as emitted by Apache, nginx (default), Lighttpd, and
@@ -74,9 +74,9 @@ func ParseNCSA(line []byte) (Event, error) {
 	method, uri, proto := splitRequest(req)
 
 	ev := Event{
-		ClientIP:  host,
+		ClientIP:  clientAddr(host),
 		Method:    method,
-		Path:      stripQuery(uri),
+		Path:      unreserved(stripQuery(uri)),
 		Proto:     proto,
 		Referer:   ref,
 		Time:      t.UTC(),
@@ -109,14 +109,14 @@ func ParseNCSA(line []byte) (Event, error) {
 	return ev, nil
 }
 
-// clfScanner walks a CLF line field by field.
+// A scanner that walks a CLF line field by field.
 type clfScanner struct {
 	err error
 	i   int
 	s   string
 }
 
-// bracket reads a [...] field (its contents may include spaces).
+// Reads a [...] field (its contents may include spaces).
 func (sc *clfScanner) bracket() string {
 	if sc.err != nil {
 		return ""
@@ -153,7 +153,7 @@ func (sc *clfScanner) fail(msg string) {
 	}
 }
 
-// plain reads a space-delimited field.
+// Reads a space-delimited field.
 func (sc *clfScanner) plain() string {
 	if sc.err != nil {
 		return ""
@@ -173,9 +173,9 @@ func (sc *clfScanner) plain() string {
 	return sc.s[start:sc.i]
 }
 
-// quote reads a "..." field and decodes its escapes: \xHH is the byte HH (how Apache and nginx log non-printable
-// bytes), and a backslash before any other byte yields that byte. ok is false when the next field is not a quote (a
-// Common-format line has no referer/user-agent).
+// Reads a "..." field and decodes its escapes: \xHH is the byte HH (how Apache and nginx log non-printable bytes), and
+// a backslash before any other byte yields that byte. ok is false when the next field is not a quote (a Common-format
+// line has no referer/user-agent).
 func (sc *clfScanner) quote() (string, bool) {
 	if sc.err != nil {
 		return "", false
@@ -237,8 +237,8 @@ func (sc *clfScanner) skipSpaces() {
 	}
 }
 
-// splitRequest splits a request line ("GET /path HTTP/1.1") into its parts, tolerating missing protocol (HTTP/0.9) or a
-// blank request.
+// Splits a request line ("GET /path HTTP/1.1") into its parts, tolerating missing protocol (HTTP/0.9) or a blank
+// request.
 func splitRequest(req string) (method, uri, proto string) {
 	f := strings.Fields(req)
 	if len(f) > 0 {

@@ -28,7 +28,7 @@ import (
 )
 
 func TestParseNCSACombined(t *testing.T) {
-	line := `203.0.113.5 - alice [03/Jul/2026:13:55:36 +0000] "GET /blog/post-1?utm=x HTTP/1.1" 200 2326 ` +
+	line := `203.0.113.5 - alice [01/Jan/2000:00:00:00 +0000] "GET /blog/post-1?utm=x HTTP/1.1" 200 2326 ` +
 		`"https://ref.example/page" "Mozilla/5.0 (X11; Linux x86_64)"`
 
 	got, err := ParseNCSA([]byte(line))
@@ -56,14 +56,28 @@ func TestParseNCSACombined(t *testing.T) {
 		t.Errorf("size/status = %d/%d, want 2326/200", got.Size, got.Status)
 	}
 
-	if got.Time.Hour() != 13 || got.Time.Month() != 7 || got.Time.Year() != 2026 {
+	if got.Time.Hour() != 0 || got.Time.Month() != 1 || got.Time.Year() != 2000 {
 		t.Errorf("time parse mismatch: %v", got.Time)
+	}
+}
+
+// A client loses its port and a path its encoded unreserved characters.
+func TestParseNCSANormalized(t *testing.T) {
+	got, err := ParseNCSA([]byte(`203.0.113.5:4711 - - [01/Jan/2000:00:00:00 +0000] "GET /%7Ea?%7E HTTP/1.1" 200 1`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	want := Event{ClientIP: "203.0.113.5", Path: "/~a", URI: "/%7Ea?%7E"}
+	if got.ClientIP != want.ClientIP || got.Path != want.Path || got.URI != want.URI {
+		t.Errorf("ClientIP, Path, URI = %q, %q, %q; want %q, %q, %q", got.ClientIP, got.Path, got.URI, want.ClientIP,
+			want.Path, want.URI)
 	}
 }
 
 func TestParseNCSACommon(t *testing.T) {
 	// Common Log Format: no referer/user-agent, and a "-" byte count.
-	line := `127.0.0.1 - - [03/Jul/2026:09:00:00 +0000] "POST /api/login HTTP/1.1" 401 -`
+	line := `127.0.0.1 - - [01/Jan/2000:00:00:00 +0000] "POST /api/login HTTP/1.1" 401 -`
 
 	got, err := ParseNCSA([]byte(line))
 	if err != nil {
@@ -87,23 +101,23 @@ func TestParseNCSAErrors(t *testing.T) {
 	for _, bad := range []string{
 		"",
 		"not a log line",
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1"`,         // no status
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1 200 1`,    // unterminated quote
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 abc`, // non-numeric size
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 20x 1`,   // non-numeric status
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000 "GET / HTTP/1.1" 200 1`,    // unterminated [
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1"`,         // no status
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1 200 1`,    // unterminated quote
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 abc`, // non-numeric size
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 20x 1`,   // non-numeric status
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000 "GET / HTTP/1.1" 200 1`,    // unterminated [
 		`1.2.3.4 - - [not a time] "GET / HTTP/1.1" 200 1`,
 		`1.2.3.4 - - missing-brackets "GET / HTTP/1.1" 200 1`,
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 -1`,                   // negative size
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 +1`,                   // signed size
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 9223372036854775808`,  // size overflows int64
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" -200 1`,                   // negative status
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" +200 1`,                   // signed status
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 99 1`,                     // status below 100
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 1000 1`,                   // status above 999
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 70000 1`,                  // status overflows
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 1 "https://r.example`, // unterminated referer
-		`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 1 "-" "agent`,         // unterminated user agent
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 -1`,                   // negative size
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 +1`,                   // signed size
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 9223372036854775808`,  // size overflows int64
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" -200 1`,                   // negative status
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" +200 1`,                   // signed status
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 99 1`,                     // status below 100
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 1000 1`,                   // status above 999
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 70000 1`,                  // status overflows
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1 "https://r.example`, // unterminated referer
+		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1 "-" "agent`,         // unterminated user agent
 		`1.2.3.4 - - [01/Jan/0001:00:00:00 +0100] "GET / HTTP/1.1" 200 1`,                    // year 0 in UTC
 	} {
 		if _, err := ParseNCSA([]byte(bad)); err == nil {
@@ -113,7 +127,7 @@ func TestParseNCSAErrors(t *testing.T) {
 }
 
 func TestParseNCSAEscapedQuote(t *testing.T) {
-	line := `1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 1 "-" "agent \"quoted\" \\ end"`
+	line := `1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1 "-" "agent \"quoted\" \\ end"`
 
 	got, err := ParseNCSA([]byte(line))
 	if err != nil {
@@ -125,7 +139,7 @@ func TestParseNCSAEscapedQuote(t *testing.T) {
 	}
 }
 
-// TestParseNCSAFixture parses real nginx Combined lines (testdata/nginx_access.log).
+// Parses real nginx Combined lines (testdata/nginx_access.log).
 func TestParseNCSAFixture(t *testing.T) {
 	raw, err := os.ReadFile("testdata/nginx_access.log")
 	if err != nil {
@@ -177,7 +191,7 @@ func TestParseNCSAFixture(t *testing.T) {
 }
 
 func TestParseNCSANoValue(t *testing.T) {
-	line := `1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" - - "-" "-"`
+	line := `1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" - - "-" "-"`
 
 	got, err := ParseNCSA([]byte(line))
 	if err != nil {
@@ -195,7 +209,7 @@ func TestParseNCSARequestLine(t *testing.T) {
 		{"GET /", "GET", "/", ""},
 		{"GET /a?b HTTP/1.1", "GET", "/a?b", "HTTP/1.1"},
 	} {
-		line := fmt.Sprintf(`1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] %q 200 1`, tc.req)
+		line := fmt.Sprintf(`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] %q 200 1`, tc.req)
 
 		got, err := ParseNCSA([]byte(line))
 		if err != nil {
@@ -210,14 +224,14 @@ func TestParseNCSARequestLine(t *testing.T) {
 }
 
 func TestParseNCSATimeZone(t *testing.T) {
-	line := `1.2.3.4 - - [03/Jul/2026:15:55:36 +0200] "GET / HTTP/1.1" 200 1`
+	line := `1.2.3.4 - - [01/Jan/2000:00:00:00 +0200] "GET / HTTP/1.1" 200 1`
 
 	got, err := ParseNCSA([]byte(line))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 
-	want := time.Date(2026, 7, 3, 13, 55, 36, 0, time.UTC)
+	want := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).Add(-2 * time.Hour)
 	if !got.Time.Equal(want) || got.Time.Location() != time.UTC {
 		t.Errorf("Time = %v, want %v", got.Time, want)
 	}
@@ -230,7 +244,7 @@ func TestParseNCSAEscapes(t *testing.T) {
 		{`\xZZ`, "xZZ"},
 		{`end\x4`, "endx4"},
 	} {
-		line := `1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 1 "-" "` + tc.field + `"`
+		line := `1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1 "-" "` + tc.field + `"`
 
 		got, err := ParseNCSA([]byte(line))
 		if err != nil {
@@ -243,9 +257,9 @@ func TestParseNCSAEscapes(t *testing.T) {
 	}
 }
 
-// TestParseNCSAFields covers the optional and extra fields around the request.
+// Checks the optional and extra fields around the request.
 func TestParseNCSAFields(t *testing.T) {
-	const prefix = `1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 1`
+	const prefix = `1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1`
 
 	for _, tc := range []struct{ tail, referer, ua string }{
 		{` "https://ref.example/"`, "https://ref.example/", ""},
@@ -263,7 +277,7 @@ func TestParseNCSAFields(t *testing.T) {
 	}
 }
 
-// TestParseNCSARanges accepts the bounds of the status and size fields.
+// The bounds of the status and size fields are accepted.
 func TestParseNCSARanges(t *testing.T) {
 	for _, tc := range []struct {
 		status, size string
@@ -273,7 +287,7 @@ func TestParseNCSARanges(t *testing.T) {
 		{"100", "0", 100, 0},
 		{"999", "9223372036854775807", 999, 9223372036854775807},
 	} {
-		line := `1.2.3.4 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" ` + tc.status + " " + tc.size
+		line := `1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" ` + tc.status + " " + tc.size
 
 		got, err := ParseNCSA([]byte(line))
 		if err != nil {

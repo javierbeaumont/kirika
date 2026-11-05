@@ -28,14 +28,14 @@ import (
 	"time"
 )
 
-// caddyRequestLine is a minimal Caddy access-log line; %s takes extra JSON request fields.
-const caddyRequestLine = `{"ts":1783082721.25,"request":{"method":"GET","uri":"/",%s},"status":200,"size":1}`
+// A minimal Caddy access-log line; %s takes extra JSON request fields.
+const caddyRequestLine = `{"ts":946684800.25,"request":{"method":"GET","uri":"/",%s},"status":200,"size":1}`
 
 func caddyRequest(fields string) []byte {
 	return []byte(fmt.Sprintf(caddyRequestLine, fields))
 }
 
-// caddyEntry is a Caddy request entry with the given ts, status and size, as raw JSON values.
+// Returns a Caddy request entry with the given ts, status and size, as raw JSON values.
 func caddyEntry(ts, status, size string) []byte {
 	return []byte(fmt.Sprintf(`{"ts":%s,"request":{"method":"GET","uri":"/"},"status":%s,"size":%s}`, ts, status, size))
 }
@@ -44,6 +44,7 @@ func TestParseCaddyJSONClientIP(t *testing.T) {
 	for _, tc := range []struct{ fields, want string }{
 		{`"client_ip":"198.51.100.7","remote_ip":"192.0.2.1"`, "198.51.100.7"},
 		{`"remote_ip":"192.0.2.1"`, "192.0.2.1"},
+		{`"client_ip":"[2001:db8::1]:443"`, "2001:db8::1"},
 		{`"proto":"HTTP/1.1"`, ""},
 	} {
 		got, err := ParseCaddyJSON(caddyRequest(tc.fields))
@@ -61,14 +62,14 @@ func TestParseCaddyJSONErrors(t *testing.T) {
 	for _, line := range [][]byte{
 		nil,
 		[]byte("not json"),
-		caddyEntry(`"1783082721"`, "200", "1"),
-		caddyEntry("1783082721", `"200"`, "1"),
-		caddyEntry("1783082721", "200", `"1"`),
-		caddyEntry("1783082721", "200.5", "1"),
-		caddyEntry("1783082721", "200", "-1"),
-		caddyEntry("1783082721", "-200", "1"),
-		caddyEntry("1783082721", "99", "1"),
-		caddyEntry("1783082721", "1000", "1"),
+		caddyEntry(`"946684800"`, "200", "1"),
+		caddyEntry("946684800", `"200"`, "1"),
+		caddyEntry("946684800", "200", `"1"`),
+		caddyEntry("946684800", "200.5", "1"),
+		caddyEntry("946684800", "200", "-1"),
+		caddyEntry("946684800", "-200", "1"),
+		caddyEntry("946684800", "99", "1"),
+		caddyEntry("946684800", "1000", "1"),
 		caddyEntry("0", "200", "1"),
 		caddyEntry("-1", "200", "1"),
 		caddyEntry("253402300800", "200", "1"),
@@ -89,7 +90,7 @@ func TestParseCaddyJSONNotAccessLog(t *testing.T) {
 	}
 }
 
-// TestParseCaddyJSONFixture parses real Caddy access-log lines (testdata/caddy_access.jsonl).
+// Parses real Caddy access-log lines (testdata/caddy_access.jsonl).
 func TestParseCaddyJSONFixture(t *testing.T) {
 	raw, err := os.ReadFile("testdata/caddy_access.jsonl")
 	if err != nil {
@@ -117,8 +118,8 @@ func TestParseCaddyJSONFixture(t *testing.T) {
 			t.Errorf("line %d: ClientIP = %q, want 172.18.0.1", i, ev.ClientIP)
 		}
 
-		if ev.Host != "localhost" {
-			t.Errorf("line %d: Host = %q, want localhost", i, ev.Host)
+		if ev.Host != "localhost:8080" {
+			t.Errorf("line %d: Host = %q, want localhost:8080", i, ev.Host)
 		}
 
 		if ev.Proto != "HTTP/1.1" {
@@ -133,8 +134,8 @@ func TestParseCaddyJSONFixture(t *testing.T) {
 			t.Errorf("line %d: Status = %d, want 200", i, ev.Status)
 		}
 
-		if ev.Time.Year() != 2026 {
-			t.Errorf("line %d: Time.Year() = %d, want 2026", i, ev.Time.Year())
+		if ev.Time.Year() != 2000 {
+			t.Errorf("line %d: Time.Year() = %d, want 2000", i, ev.Time.Year())
 		}
 	}
 
@@ -181,9 +182,20 @@ func TestParseCaddyJSONHost(t *testing.T) {
 		{"", ""},
 		{"::1", "::1"},
 		{"[::1]", "::1"},
-		{"[::1]:8080", "::1"},
+		{"[::1]:443", "::1"},
+		{"[::1]:8080", "[::1]:8080"},
+		{"[::1]:08080", "[::1]:8080"},
 		{"example.com", "example.com"},
-		{"example.com:8443", "example.com"},
+		{"example.com:", "example.com"},
+		{"example.com:80", "example.com"},
+		{"example.com:080", "example.com"},
+		{"example.com:443", "example.com"},
+		{"example.com:0443", "example.com"},
+		{"example.com:8443", "example.com:8443"},
+		{"example.com:08443", "example.com:8443"},
+		{"example.com:http", "example.com:http"},
+		{"example.com:+80", "example.com:+80"},
+		{"example.com:070000", "example.com:070000"},
 	} {
 		got, err := ParseCaddyJSON(caddyRequest(fmt.Sprintf(`"host":%q`, tc.host)))
 		if err != nil {
@@ -201,9 +213,10 @@ func TestParseCaddyJSONPath(t *testing.T) {
 		{"*", "*"},
 		{"/a/b", "/a/b"},
 		{"/a?b=c?d", "/a"},
+		{"/%7Ea?%7E", "/~a"},
 		{"?x", ""},
 	} {
-		line := fmt.Sprintf(`{"ts":1783082721,"request":{"method":"GET","uri":%q},"status":200,"size":1}`, tc.uri)
+		line := fmt.Sprintf(`{"ts":946684800,"request":{"method":"GET","uri":%q},"status":200,"size":1}`, tc.uri)
 
 		got, err := ParseCaddyJSON([]byte(line))
 		if err != nil {
@@ -216,15 +229,15 @@ func TestParseCaddyJSONPath(t *testing.T) {
 	}
 }
 
-// TestParseCaddyJSONRanges accepts the bounds of every checked field.
+// The bounds of every checked field are accepted.
 func TestParseCaddyJSONRanges(t *testing.T) {
 	for _, tc := range []struct {
 		ts, status, size string
 		wantStatus       int
 		wantSize         int64
 	}{
-		{"1783082721", "0", "0", 0, 0},
-		{"1783082721", "100", "9223372036854775807", 100, 9223372036854775807},
+		{"946684800", "0", "0", 0, 0},
+		{"946684800", "100", "9223372036854775807", 100, 9223372036854775807},
 		{"253402300799", "999", "1", 999, 1},
 	} {
 		got, err := ParseCaddyJSON(caddyEntry(tc.ts, tc.status, tc.size))
@@ -244,7 +257,7 @@ func TestParseCaddyJSONTime(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	if want := time.Unix(1783082721, 250000000).UTC(); !got.Time.Equal(want) || got.Time.Location() != time.UTC {
+	if want := time.Unix(946684800, 250000000).UTC(); !got.Time.Equal(want) || got.Time.Location() != time.UTC {
 		t.Errorf("Time = %v, want %v", got.Time, want)
 	}
 }
