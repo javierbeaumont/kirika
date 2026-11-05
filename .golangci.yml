@@ -11,3 +11,6 @@ linters:
   settings:
     lll:
       tab-width: 4
+    staticcheck:
+      # The default checks, ST1020-ST1022 included: the doc comment of an exported name opens with the name.
+      checks: ["all", "-ST1000", "-ST1003", "-ST1016"]
