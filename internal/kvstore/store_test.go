@@ -97,7 +97,7 @@ func TestOpen(t *testing.T) {
 	defer closeStore(t, db)
 
 	err = db.b.View(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bktAgg, bktSess, bktUniq} {
+		for _, name := range [][]byte{bktAgg, bktSess, bktState, bktUniq} {
 			if tx.Bucket(name) == nil {
 				t.Errorf("no %s bucket", name)
 			}

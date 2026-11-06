@@ -103,10 +103,10 @@ func writeUnique(bkt *bolt.Bucket, u map[string]*hyperloglog.Sketch) error {
 	return nil
 }
 
-// Unique estimates a host's distinct clients with a page in a class f counts, over a year or a month; a year merges its
-// months. Only pages add clients, so the kind of f changes nothing. A day is an error, and an unreadable sketch counts
-// as empty.
-func (db *DB) Unique(host, period string, f Filter) (uint64, error) {
+// Unique estimates the distinct clients with a page in a class f counts on the given hosts, over a year or a month. A
+// client counts once across hosts and across the months of a year. Only pages add clients, so the kind of f changes
+// nothing. A day is an error, and an unreadable sketch counts as empty.
+func (db *DB) Unique(period string, f Filter, hosts ...string) (uint64, error) {
 	date, err := checked(period, f)
 	if err != nil {
 		return 0, err
@@ -121,15 +121,17 @@ func (db *DB) Unique(host, period string, f Filter) (uint64, error) {
 	err = db.b.View(func(tx *bolt.Tx) error {
 		bkt := tx.Bucket(bktUniq)
 
-		for _, ym := range months(date) {
-			for cl := range class(numClasses) {
-				if !f.has(cl) {
-					continue
-				}
+		for _, host := range hosts {
+			for _, ym := range months(date) {
+				for cl := range class(numClasses) {
+					if !f.has(cl) {
+						continue
+					}
 
-				if sk, ok := loadSketch(bkt.Get(uniqKey(hostKey(host), ym, cl))); ok {
-					if err := acc.Merge(sk); err != nil {
-						return err
+					if sk, ok := loadSketch(bkt.Get(uniqKey(hostKey(host), ym, cl))); ok {
+						if err := acc.Merge(sk); err != nil {
+							return err
+						}
 					}
 				}
 			}

@@ -21,6 +21,7 @@ package kvstore
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/http"
@@ -55,7 +56,10 @@ const (
 	tagExit  = "x" // path
 )
 
-var errBadPeriod = errors.New("kvstore: invalid period, want YYYY, YYYY-MM or YYYY-MM-DD")
+var (
+	errBadKey    = errors.New("kvstore: corrupt key")
+	errBadPeriod = errors.New("kvstore: invalid period, want YYYY, YYYY-MM or YYYY-MM-DD")
+)
 
 // DefaultVisitTimeout is the longest gap between two pages of one visit, unless told otherwise. It is AWStats'
 // VISITTIMEOUT: https://github.com/eldy/AWStats/blob/AWSTATS_8_0/wwwroot/cgi-bin/awstats.pl#L62-L63
@@ -80,17 +84,25 @@ func DefaultOptions() Options {
 	}
 }
 
-// Batch holds in memory what applied events add, until DB.Flush writes it in one transaction.
+// Batch holds in memory what applied events add and the log states set on it, until DB.Flush writes them in one
+// transaction.
 type Batch struct {
 	d       map[string]tally
 	events  []sessEvent // in log order
 	index   []string    // "/" and an index page name each
 	loc     *time.Location
 	notPage map[string]bool
-	query   string // "?", which starts a query (RFC 3986, section 3.4), and the query separators
+	query   string              // "?", which starts a query (RFC 3986, section 3.4), and the query separators
+	state   map[string]LogState // by log path
 	timeout time.Duration
 	u       map[string]*hyperloglog.Sketch
 	valid   map[int]bool
+}
+
+// Host is a host with data and the YYYY-MM months, in the store's zone, of its first and last days.
+type Host struct {
+	Name        string
+	First, Last string
 }
 
 // TimePoint is one bucket of a time series.
@@ -111,6 +123,7 @@ func (db *DB) NewBatch(o Options) *Batch {
 		loc:     db.loc,
 		notPage: setOf(o.NotPages...),
 		query:   "?" + o.QuerySeparators,
+		state:   map[string]LogState{},
 		timeout: o.VisitTimeout,
 		u:       map[string]*hyperloglog.Sketch{},
 		valid:   map[int]bool{},
@@ -248,10 +261,10 @@ func clip(s string) string {
 	return s[:maxValueLen]
 }
 
-// Flush adds the batch to the stored counters, sketches and sessions in one transaction and empties it. On error
-// nothing is written and the batch is kept.
+// Flush writes the batch in one transaction and empties it: its counters, sketches and sessions add to the stored ones,
+// and its log states replace theirs. On error nothing is written and the batch is kept.
 func (db *DB) Flush(b *Batch) error {
-	if len(b.d) == 0 {
+	if len(b.d) == 0 && len(b.state) == 0 {
 		return nil
 	}
 
@@ -290,6 +303,10 @@ func (db *DB) Flush(b *Batch) error {
 			}
 		}
 
+		if err := writeState(tx.Bucket(bktState), b.state); err != nil {
+			return err
+		}
+
 		return writeUnique(tx.Bucket(bktUniq), b.u)
 	})
 	if err != nil {
@@ -299,6 +316,7 @@ func (db *DB) Flush(b *Batch) error {
 	b.d = map[string]tally{}
 	b.u = map[string]*hyperloglog.Sketch{}
 	b.events = nil
+	b.state = map[string]LogState{}
 
 	return nil
 }
@@ -412,4 +430,50 @@ func checked(period string, f Filter) (string, error) {
 	}
 
 	return compact(period)
+}
+
+// Hosts returns every host with data, in name order.
+func (db *DB) Hosts() ([]Host, error) {
+	var out []Host
+
+	err := db.b.View(func(tx *bolt.Tx) error {
+		day := encKey(tagDay)
+		cur := tx.Bucket(bktAgg).Cursor()
+
+		// A host's day keys are adjacent and in date order.
+		for k, _ := cur.Seek(day); bytes.HasPrefix(k, day); k, _ = cur.Next() {
+			name, month, ok := splitDay(k[len(day):])
+			if !ok {
+				return fmt.Errorf("%w: %q", errBadKey, k)
+			}
+
+			if n := len(out); n > 0 && out[n-1].Name == name {
+				out[n-1].Last = month
+			} else {
+				out = append(out, Host{Name: name, First: month, Last: month})
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	slices.SortFunc(out, func(a, b Host) int { return strings.Compare(a.Name, b.Name) })
+
+	return out, nil
+}
+
+// Returns the host and the YYYY-MM month of a day key from what follows its encKey(tagDay). ok is false for a key of
+// another shape.
+func splitDay(rest []byte) (host, month string, ok bool) {
+	n, w := binary.Uvarint(rest)
+	if w <= 0 || len(rest) < w+8 || n != uint64(len(rest)-w-8) {
+		return "", "", false
+	}
+
+	date := rest[len(rest)-8:]
+
+	return string(rest[w : len(rest)-8]), string(date[:4]) + "-" + string(date[4:6]), true
 }

@@ -20,6 +20,8 @@
 package kvstore
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"math"
 	"path/filepath"
@@ -603,6 +605,66 @@ func TestHosts(t *testing.T) {
 	}
 }
 
+// Hosts lists each host once, in name order, with the months of its first and last days.
+func TestHostList(t *testing.T) {
+	db := openStore(t)
+
+	if got, err := db.Hosts(); err != nil || len(got) != 0 {
+		t.Fatalf("Hosts of an empty store = %+v, %v; want none", got, err)
+	}
+
+	early, late := base.AddDate(0, -2, 0), base.AddDate(0, 2, 0)
+	flush(t, db,
+		page("zz", "/", 200, 1, base),
+		page("aaa", "/", 200, 1, late),
+		page("aaa", "/", 200, 1, base),
+		page("zz", "/", 200, 1, early),
+	)
+
+	month := func(d time.Time) string { return d.Format("2006-01") }
+	want := []Host{{"aaa", month(base), month(late)}, {"zz", month(early), month(base)}}
+
+	if got, err := db.Hosts(); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("Hosts = %+v, %v; want %+v", got, err, want)
+	}
+}
+
+// A day key of another shape fails Hosts.
+func TestHostListCorrupt(t *testing.T) {
+	db := openStore(t)
+	putRaw(t, db, bktAgg, append(encKey(tagDay), 0x80), nil)
+
+	if _, err := db.Hosts(); !errors.Is(err, errBadKey) {
+		t.Errorf("Hosts: err = %v, want errBadKey", err)
+	}
+}
+
+// A day key gives its host and month, whether the host's length takes one byte of it or two. A key of another shape is
+// refused.
+func TestSplitDay(t *testing.T) {
+	day := len(encKey(tagDay))
+	date := base.Format("20060102")
+
+	for _, host := range []string{"h", strings.Repeat("h", 200)} {
+		name, month, ok := splitDay(timeKey(tagDay, host, date)[day:])
+		if want := base.Format("2006-01"); !ok || name != host || month != want {
+			t.Errorf("splitDay of %.10q... = %.10q..., %q, %v; want %q", host, name, month, ok, want)
+		}
+	}
+
+	good := timeKey(tagDay, "h", date)[day:]
+
+	for name, rest := range map[string][]byte{
+		"cut length":     bytes.Repeat([]byte{0x80}, 8),
+		"wrapped length": binary.AppendUvarint(nil, math.MaxUint64-7),
+		"long date":      append(bytes.Clone(good), '0'),
+	} {
+		if _, _, ok := splitDay(rest); ok {
+			t.Errorf("%s %q: split", name, rest)
+		}
+	}
+}
+
 // Bandwidth is capped at math.MaxInt64, within a batch and across flushes.
 func TestBandwidthCapped(t *testing.T) {
 	db := openStore(t)
@@ -616,22 +678,23 @@ func TestBandwidthCapped(t *testing.T) {
 	}
 }
 
-// A flush adds to the stored counters and empties the batch, sketches and pages for the visits included.
+// A flush adds to the stored counters and empties the batch: sketches, pages for the visits and log states included.
 func TestFlushAdds(t *testing.T) {
 	db := openStore(t)
 	ev := from(ip(0), page("h", "/", 200, 3, base))
 
 	b := db.NewBatch(DefaultOptions())
 	b.Apply(ev)
+	b.SetState("/a.log", LogState{Offset: 1})
 
 	for range 2 {
 		if err := db.Flush(b); err != nil {
 			t.Fatalf("flush: %v", err)
 		}
 
-		if len(b.d) != 0 || len(b.u) != 0 || len(b.events) != 0 {
-			t.Fatalf("the batch keeps %d counters, %d sketches and %d pages after a flush", len(b.d), len(b.u),
-				len(b.events))
+		if len(b.d) != 0 || len(b.u) != 0 || len(b.events) != 0 || len(b.state) != 0 {
+			t.Fatalf("the batch keeps %d counters, %d sketches, %d pages and %d log states after a flush", len(b.d),
+				len(b.u), len(b.events), len(b.state))
 		}
 	}
 
@@ -664,6 +727,7 @@ func TestCorruptValue(t *testing.T) {
 	b := db.NewBatch(DefaultOptions())
 	b.Apply(from(ip(0), page("good", "/", 200, 1, base)))
 	b.Apply(page("bad", "/", 200, 1, base))
+	b.SetState("/a.log", LogState{Offset: 1})
 
 	if err := db.Flush(b); !errors.Is(err, errBadValue) {
 		t.Fatalf("Flush: err = %v, want errBadValue", err)
@@ -675,6 +739,10 @@ func TestCorruptValue(t *testing.T) {
 
 	if got := unique(t, db, "good", "2000", Filter{}); got != 0 {
 		t.Errorf("unique visitors of good after the failed flush = %d, want 0", got)
+	}
+
+	if s, ok := logState(t, db, "/a.log"); ok {
+		t.Errorf("log state after the failed flush = %+v, want none", s)
 	}
 
 	repaired := encodeTally(tally{{0, Counts{}}})
@@ -691,6 +759,10 @@ func TestCorruptValue(t *testing.T) {
 
 	if got := unique(t, db, "good", "2000", Filter{}); got != 1 {
 		t.Errorf("unique visitors of good after the repair = %d, want 1", got)
+	}
+
+	if got, ok := logState(t, db, "/a.log"); !ok || got != (LogState{Offset: 1}) {
+		t.Errorf("log state after the repair = %+v, %v; want offset 1", got, ok)
 	}
 }
 

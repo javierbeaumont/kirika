@@ -59,9 +59,9 @@ func visits(host string, first, last int, t time.Time) []logparse.Event {
 func unique(t *testing.T, db *DB, host, period string, f Filter) uint64 {
 	t.Helper()
 
-	n, err := db.Unique(host, period, f)
+	n, err := db.Unique(period, f, host)
 	if err != nil {
-		t.Fatalf("Unique(%q, %q, %+v): %v", host, period, f, err)
+		t.Fatalf("Unique(%q, %+v, %q): %v", period, f, host, err)
 	}
 
 	return n
@@ -182,6 +182,26 @@ func TestUniqueMerges(t *testing.T) {
 	}
 }
 
+// A client counts once across hosts, and a host named twice counts once. With no host, the count is 0.
+func TestUniqueHosts(t *testing.T) {
+	db := openStore(t)
+	flush(t, db, visits("a", 0, 1000, base)...)
+	flush(t, db, visits("b", 500, 1500, base.AddDate(0, 1, 0))...)
+
+	for _, tc := range []struct {
+		hosts []string
+		want  int
+	}{
+		{nil, 0},
+		{[]string{"a", "B"}, 1500},
+		{[]string{"a", "A"}, 1000},
+	} {
+		if got, err := db.Unique("2000", Filter{}, tc.hosts...); err != nil || !near(got, tc.want) {
+			t.Errorf("Unique of %q = %d, %v; want about %d", tc.hosts, got, err, tc.want)
+		}
+	}
+}
+
 func TestClientKey(t *testing.T) {
 	for in, want := range map[string]string{
 		"192.0.2.1":            "192.0.2.1",
@@ -229,7 +249,7 @@ func TestUniqueErrors(t *testing.T) {
 		{"2000/01", Filter{}, errBadPeriod},
 		{"2000", Filter{Status: AllStatuses + 1}, errBadFilter},
 	} {
-		if _, err := db.Unique("h", tc.period, tc.f); !errors.Is(err, tc.want) {
+		if _, err := db.Unique(tc.period, tc.f, "h"); !errors.Is(err, tc.want) {
 			t.Errorf("Unique(%q, %+v): err = %v, want %v", tc.period, tc.f, err, tc.want)
 		}
 	}

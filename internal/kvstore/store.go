@@ -38,6 +38,7 @@ var (
 	bktAgg     = []byte("agg")
 	bktMeta    = []byte("meta")
 	bktSess    = []byte("sess")
+	bktState   = []byte("state")
 	bktUniq    = []byte("uniq")
 	metaSalt   = []byte("salt")
 	metaSchema = []byte("schema")
@@ -95,7 +96,7 @@ func (db *DB) Close() error {
 // Creates the buckets and writes the schema version, the time zone and the salt, or checks the stored ones.
 func (db *DB) init(zone string) error {
 	return db.b.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bktAgg, bktSess, bktUniq} {
+		for _, name := range [][]byte{bktAgg, bktSess, bktState, bktUniq} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
