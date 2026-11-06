@@ -79,9 +79,9 @@ func sameClasses(a, b []class) bool {
 // A filter adds up its classes and keeps the part of its kind.
 func TestFilterSum(t *testing.T) {
 	tl := tally{
-		{newClass(false, groupCorrect), Counts{HitBandwidth: 100, Hits: 10, PageBandwidth: 60, Pages: 4}},
+		{newClass(false, groupCorrect), Counts{HitBandwidth: 100, Hits: 10, PageBandwidth: 60, Pages: 4, Visits: 3}},
 		{newClass(false, groupError), Counts{HitBandwidth: 7, Hits: 1, PageBandwidth: 7, Pages: 1}},
-		{newClass(true, groupCorrect), Counts{HitBandwidth: 50, Hits: 5, PageBandwidth: 20, Pages: 2}},
+		{newClass(true, groupCorrect), Counts{HitBandwidth: 50, Hits: 5, PageBandwidth: 20, Pages: 2, Visits: 1}},
 	}
 
 	for _, tc := range []struct {
@@ -89,14 +89,14 @@ func TestFilterSum(t *testing.T) {
 		want Counts
 		ok   bool
 	}{
-		{Filter{}, Counts{HitBandwidth: 100, Hits: 10, PageBandwidth: 60, Pages: 4}, true},
-		{Filter{Kind: PageKind}, Counts{HitBandwidth: 60, Hits: 4, PageBandwidth: 60, Pages: 4}, true},
+		{Filter{}, Counts{HitBandwidth: 100, Hits: 10, PageBandwidth: 60, Pages: 4, Visits: 3}, true},
+		{Filter{Kind: PageKind}, Counts{HitBandwidth: 60, Hits: 4, PageBandwidth: 60, Pages: 4, Visits: 3}, true},
 		{Filter{Kind: FileKind}, Counts{HitBandwidth: 40, Hits: 6}, true},
-		{Filter{Audience: Bots}, Counts{HitBandwidth: 50, Hits: 5, PageBandwidth: 20, Pages: 2}, true},
+		{Filter{Audience: Bots}, Counts{HitBandwidth: 50, Hits: 5, PageBandwidth: 20, Pages: 2, Visits: 1}, true},
 		{Filter{Status: Errors}, Counts{HitBandwidth: 7, Hits: 1, PageBandwidth: 7, Pages: 1}, true},
 		{
 			Filter{Audience: AllAudiences, Status: AllStatuses},
-			Counts{HitBandwidth: 157, Hits: 16, PageBandwidth: 87, Pages: 7},
+			Counts{HitBandwidth: 157, Hits: 16, PageBandwidth: 87, Pages: 7, Visits: 4},
 			true,
 		},
 		{Filter{Audience: Bots, Status: Errors}, Counts{}, false},

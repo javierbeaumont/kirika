@@ -46,10 +46,10 @@ func TestEncKey(t *testing.T) {
 }
 
 func TestCountsAdd(t *testing.T) {
-	c := Counts{HitBandwidth: math.MaxInt64, Hits: 1, PageBandwidth: 5, Pages: math.MaxInt64 - 1}
-	c.add(Counts{HitBandwidth: math.MaxInt64, Hits: 2, PageBandwidth: math.MaxInt64, Pages: 1})
+	c := Counts{HitBandwidth: math.MaxInt64, Hits: 1, PageBandwidth: 5, Pages: math.MaxInt64 - 1, Visits: 7}
+	c.add(Counts{HitBandwidth: math.MaxInt64, Hits: 2, PageBandwidth: math.MaxInt64, Pages: 1, Visits: math.MaxInt64})
 
-	if want := (Counts{math.MaxInt64, 3, math.MaxInt64, math.MaxInt64}); c != want {
+	if want := (Counts{math.MaxInt64, 3, math.MaxInt64, math.MaxInt64, math.MaxInt64}); c != want {
 		t.Errorf("add = %+v, want %+v", c, want)
 	}
 }
@@ -70,8 +70,8 @@ func TestTallyAdd(t *testing.T) {
 func TestTallyRoundTrip(t *testing.T) {
 	for _, tl := range []tally{
 		{{0, Counts{}}},
-		{{1, Counts{4, 2, 3, 1}}, {numClasses - 1, Counts{HitBandwidth: 9}}},
-		{{2, Counts{math.MaxInt64, math.MaxInt64, math.MaxInt64, math.MaxInt64}}},
+		{{1, Counts{4, 2, 3, 1, 5}}, {numClasses - 1, Counts{HitBandwidth: 9}}},
+		{{2, Counts{math.MaxInt64, math.MaxInt64, math.MaxInt64, math.MaxInt64, math.MaxInt64}}},
 	} {
 		got, err := decodeTally(encodeTally(tl))
 		if err != nil || !reflect.DeepEqual(got, tl) {
@@ -83,22 +83,22 @@ func TestTallyRoundTrip(t *testing.T) {
 func TestDecodeTallyErrors(t *testing.T) {
 	// The page bytes overflow: as an int64 they would be -1, which no other check refuses.
 	maxUint := append([]byte{countVersion, 0, 0, 0}, bytes.Repeat([]byte{0xff}, 9)...)
-	maxUint = append(maxUint, 0x01, 0)
+	maxUint = append(maxUint, 0x01, 0, 0)
 
 	for name, b := range map[string][]byte{
 		"empty":            {},
 		"no class":         {countVersion},
-		"version 0":        {0, 0, 0, 0, 0, 0},
-		"newer version":    {countVersion + 1, 0, 0, 0, 0, 0},
-		"unknown class":    {countVersion, numClasses, 0, 0, 0, 0},
-		"repeated class":   {countVersion, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0},
-		"classes reversed": {countVersion, 2, 0, 0, 0, 0, 1, 0, 0, 0, 0},
-		"missing counters": {countVersion, 0, 1, 1, 1},
-		"cut uvarint":      {countVersion, 0, 1, 1, 1, 0x80},
+		"version 0":        {0, 0, 0, 0, 0, 0, 0},
+		"newer version":    {countVersion + 1, 0, 0, 0, 0, 0, 0},
+		"unknown class":    {countVersion, numClasses, 0, 0, 0, 0, 0},
+		"repeated class":   {countVersion, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0},
+		"classes reversed": {countVersion, 2, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0},
+		"missing counters": {countVersion, 0, 1, 1, 1, 1},
+		"cut uvarint":      {countVersion, 0, 1, 1, 1, 1, 0x80},
 		"over int64":       maxUint,
 		"uvarint overflow": append([]byte{countVersion, 0}, bytes.Repeat([]byte{0xff}, 11)...),
-		"pages over hits":  {countVersion, 0, 0, 1, 0, 2},
-		"page bytes over":  {countVersion, 0, 1, 0, 2, 0},
+		"pages over hits":  {countVersion, 0, 0, 1, 0, 2, 0},
+		"page bytes over":  {countVersion, 0, 1, 0, 2, 0, 0},
 	} {
 		if _, err := decodeTally(b); !errors.Is(err, errBadValue) {
 			t.Errorf("%s %x: err = %v, want errBadValue", name, b, err)

@@ -128,6 +128,13 @@ func pageCounts(n, size int64) Counts {
 	return Counts{HitBandwidth: size, Hits: n, PageBandwidth: size, Pages: n}
 }
 
+// Returns c with v visits.
+func withVisits(c Counts, v int64) Counts {
+	c.Visits = v
+
+	return c
+}
+
 // Checks every counter, time series and dimension of a set of human requests in the default view.
 func TestApply(t *testing.T) {
 	db := openStore(t)
@@ -372,7 +379,7 @@ func TestDaylightSaving(t *testing.T) {
 func TestValidCodes(t *testing.T) {
 	db := openStore(t)
 
-	b := db.NewBatch(Options{ValidCodes: []int{200}})
+	b := db.NewBatch(Options{ValidCodes: []int{200}, VisitTimeout: DefaultVisitTimeout})
 	b.Apply(page("h", "/", 200, 1, base))
 	b.Apply(page("h", "/", 304, 2, base))
 
@@ -404,7 +411,9 @@ func TestIndexPages(t *testing.T) {
 		t.Errorf("Dim with the default index pages = %+v, want %+v", got, want)
 	}
 
-	b := db.NewBatch(Options{IndexPages: []string{"default.htm", "index.png"}, ValidCodes: []int{200}})
+	b := db.NewBatch(Options{
+		IndexPages: []string{"default.htm", "index.png"}, ValidCodes: []int{200}, VisitTimeout: DefaultVisitTimeout,
+	})
 	for _, path := range []string{"/default.htm", "/index.html", "/index.png"} {
 		b.Apply(page("o", path, 200, 1, base))
 	}
@@ -461,7 +470,12 @@ func TestQuerySeparators(t *testing.T) {
 		t.Errorf("Dim of referrers by default = %+v, want %+v", got, want)
 	}
 
-	b := db.NewBatch(Options{IndexPages: []string{"index.html"}, QuerySeparators: ";", ValidCodes: []int{200}})
+	b := db.NewBatch(Options{
+		IndexPages:      []string{"index.html"},
+		QuerySeparators: ";",
+		ValidCodes:      []int{200},
+		VisitTimeout:    DefaultVisitTimeout,
+	})
 
 	for _, path := range []string{"/app;s=1", "/index.html;s=1", "/logo.png;v=2", "/robots.txt;s=1"} {
 		ev := page("o", path, 200, 1, base)
@@ -602,7 +616,7 @@ func TestBandwidthCapped(t *testing.T) {
 	}
 }
 
-// A flush adds to the stored counters and empties the batch, sketches included.
+// A flush adds to the stored counters and empties the batch, sketches and pages for the visits included.
 func TestFlushAdds(t *testing.T) {
 	db := openStore(t)
 	ev := from(ip(0), page("h", "/", 200, 3, base))
@@ -615,15 +629,16 @@ func TestFlushAdds(t *testing.T) {
 			t.Fatalf("flush: %v", err)
 		}
 
-		if len(b.d) != 0 || len(b.u) != 0 {
-			t.Fatalf("the batch keeps %d counters and %d sketches after a flush", len(b.d), len(b.u))
+		if len(b.d) != 0 || len(b.u) != 0 || len(b.events) != 0 {
+			t.Fatalf("the batch keeps %d counters, %d sketches and %d pages after a flush", len(b.d), len(b.u),
+				len(b.events))
 		}
 	}
 
 	flush(t, db, ev)
 	flush(t, db)
 
-	if got, want := totals(t, db, "h", "2000", Filter{}), pageCounts(2, 6); got != want {
+	if got, want := totals(t, db, "h", "2000", Filter{}), withVisits(pageCounts(2, 6), 1); got != want {
 		t.Errorf("Totals = %+v, want %+v", got, want)
 	}
 }

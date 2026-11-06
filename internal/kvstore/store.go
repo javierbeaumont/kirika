@@ -37,7 +37,9 @@ const schemaVersion = 1
 var (
 	bktAgg     = []byte("agg")
 	bktMeta    = []byte("meta")
+	bktSess    = []byte("sess")
 	bktUniq    = []byte("uniq")
+	metaSalt   = []byte("salt")
 	metaSchema = []byte("schema")
 	metaZone   = []byte("zone")
 )
@@ -51,14 +53,15 @@ var (
 
 // DB is an open store. bbolt locks the file, so one process at a time holds it.
 type DB struct {
-	b   *bolt.DB
-	loc *time.Location // the zone of its hours, days and months
+	b    *bolt.DB
+	loc  *time.Location // the zone of its hours, days and months
+	salt []byte         // the key of its session IDs
 }
 
 // Open opens the store at path, creating it if missing. timeout bounds the wait for another process to release the file
 // (0 waits forever). zone names the time zone of its hours, days and months, such as America/New_York. When empty, it
 // is the zone the store keeps or, for a new store, the system's, else UTC. A store written by a newer build or with a
-// corrupt schema version is refused, and so is a zone the system does not know or other than the stored one.
+// corrupt schema version or salt is refused, and so is a zone the system does not know or other than the stored one.
 func Open(path string, timeout time.Duration, zone string) (*DB, error) {
 	b, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: timeout})
 	if errors.Is(err, berrors.ErrTimeout) {
@@ -89,10 +92,10 @@ func (db *DB) Close() error {
 	return db.b.Close()
 }
 
-// Creates the buckets and writes the schema version and the time zone, or checks the stored ones.
+// Creates the buckets and writes the schema version, the time zone and the salt, or checks the stored ones.
 func (db *DB) init(zone string) error {
 	return db.b.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bktAgg, bktUniq} {
+		for _, name := range [][]byte{bktAgg, bktSess, bktUniq} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -132,10 +135,12 @@ func (db *DB) init(zone string) error {
 		db.loc = loc
 
 		if stored == "" {
-			return meta.Put(metaZone, []byte(zone))
+			if err := meta.Put(metaZone, []byte(zone)); err != nil {
+				return err
+			}
 		}
 
-		return nil
+		return db.loadSalt(meta)
 	})
 }
 

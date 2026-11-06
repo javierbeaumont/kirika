@@ -32,12 +32,14 @@ const countVersion = 1
 var errBadValue = errors.New("kvstore: corrupt or unknown counter value")
 
 // Counts holds the counters of one class, or their sum over several. Pages and PageBandwidth are the part of Hits and
-// HitBandwidth that pages make; files make the rest.
+// HitBandwidth that pages make; files make the rest. Visits are those that began in the period or on an entry page, or
+// ended on an exit page.
 type Counts struct {
 	HitBandwidth  int64 // response bytes
 	Hits          int64
 	PageBandwidth int64
 	Pages         int64
+	Visits        int64
 }
 
 // Adds d to c, capping each counter at math.MaxInt64. Counters are never negative.
@@ -46,6 +48,7 @@ func (c *Counts) add(d Counts) {
 	c.Hits = addCapped(c.Hits, d.Hits)
 	c.PageBandwidth = addCapped(c.PageBandwidth, d.PageBandwidth)
 	c.Pages = addCapped(c.Pages, d.Pages)
+	c.Visits = addCapped(c.Visits, d.Visits)
 }
 
 func addCapped(a, b int64) int64 {
@@ -97,7 +100,7 @@ func encodeTally(t tally) []byte {
 	b := []byte{countVersion}
 	for _, e := range t {
 		b = append(b, byte(e.class))
-		for _, v := range [...]int64{e.HitBandwidth, e.Hits, e.PageBandwidth, e.Pages} {
+		for _, v := range [...]int64{e.HitBandwidth, e.Hits, e.PageBandwidth, e.Pages, e.Visits} {
 			b = binary.AppendUvarint(b, uint64(v))
 		}
 	}
@@ -121,7 +124,7 @@ func decodeTally(b []byte) (tally, error) {
 
 		rest = rest[1:]
 
-		var f [4]int64
+		var f [5]int64
 
 		for i := range f {
 			v, n := binary.Uvarint(rest)
@@ -133,7 +136,7 @@ func decodeTally(b []byte) (tally, error) {
 			rest = rest[n:]
 		}
 
-		c := Counts{HitBandwidth: f[0], Hits: f[1], PageBandwidth: f[2], Pages: f[3]}
+		c := Counts{HitBandwidth: f[0], Hits: f[1], PageBandwidth: f[2], Pages: f[3], Visits: f[4]}
 		if c.Pages > c.Hits || c.PageBandwidth > c.HitBandwidth {
 			return nil, errBadValue
 		}

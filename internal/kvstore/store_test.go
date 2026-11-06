@@ -97,7 +97,7 @@ func TestOpen(t *testing.T) {
 	defer closeStore(t, db)
 
 	err = db.b.View(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bktAgg, bktUniq} {
+		for _, name := range [][]byte{bktAgg, bktSess, bktUniq} {
 			if tx.Bucket(name) == nil {
 				t.Errorf("no %s bucket", name)
 			}
@@ -173,6 +173,54 @@ func TestOpenSchema(t *testing.T) {
 
 			if !errors.Is(err, tc.want) {
 				t.Errorf("schema %q, timeout %v: err = %v, want %v", tc.v, timeout, err, tc.want)
+			}
+		}
+	}
+}
+
+// A store's salt is generated once, kept across opens and its own.
+func TestSalt(t *testing.T) {
+	salts := make([][]byte, 0, 4)
+
+	for _, path := range []string{storePath(t), storePath(t)} {
+		for range 2 {
+			db, err := Open(path, time.Second, "UTC")
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+
+			salts = append(salts, db.salt)
+			closeStore(t, db)
+		}
+	}
+
+	if len(salts[0]) != saltLen {
+		t.Errorf("salt of %d bytes, want %d", len(salts[0]), saltLen)
+	}
+
+	if !bytes.Equal(salts[0], salts[1]) {
+		t.Error("the salt changed on reopening")
+	}
+
+	if bytes.Equal(salts[0], salts[2]) {
+		t.Error("two stores have the same salt")
+	}
+}
+
+// A stored salt of another size is refused, and the refused store releases its lock.
+func TestSaltCorrupt(t *testing.T) {
+	for _, salt := range [][]byte{{}, make([]byte, saltLen-1), make([]byte, saltLen+1)} {
+		path := storePath(t)
+		setMeta(t, path, metaSalt, salt)
+
+		for _, timeout := range []time.Duration{time.Second, 50 * time.Millisecond} {
+			db, err := Open(path, timeout, "UTC")
+			if err == nil {
+				closeStore(t, db)
+			}
+
+			if !errors.Is(err, errSaltCorrupt) {
+				t.Errorf("salt of %d bytes, timeout %v: err = %v, want errSaltCorrupt", len(salt), timeout, err)
 			}
 		}
 	}

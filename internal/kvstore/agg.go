@@ -49,34 +49,46 @@ const (
 	tagStat = "s"  // HTTP status
 	tagRef  = "r"  // referrer
 	tagCli  = "c"  // client kind: desktop or mobile for a human, bot for a bot
+
+	// Of these two, only Visits counts: the visits that began or ended on a page.
+	tagEntry = "e" // path
+	tagExit  = "x" // path
 )
 
 var errBadPeriod = errors.New("kvstore: invalid period, want YYYY, YYYY-MM or YYYY-MM-DD")
 
+// DefaultVisitTimeout is the longest gap between two pages of one visit, unless told otherwise. It is AWStats'
+// VISITTIMEOUT: https://github.com/eldy/AWStats/blob/AWSTATS_8_0/wwwroot/cgi-bin/awstats.pl#L62-L63
+const DefaultVisitTimeout = time.Hour
+
 // Options are the counting rules of a batch.
 type Options struct {
-	IndexPages      []string // file names of a directory's index page
-	NotPages        []string // extensions never counted as pages, besides the image and download types
-	QuerySeparators string   // characters besides "?" that start the query of a path or a referrer
-	ValidCodes      []int    // the status codes of a correct request
+	IndexPages      []string      // file names of a directory's index page
+	NotPages        []string      // extensions never counted as pages, besides the image and download types
+	QuerySeparators string        // characters besides "?" that start the query of a path or a referrer
+	ValidCodes      []int         // the status codes of a correct request
+	VisitTimeout    time.Duration // the longest gap between two pages of one visit
 }
 
 // DefaultOptions returns the counting rules kirika uses unless told otherwise.
 func DefaultOptions() Options {
 	return Options{
-		IndexPages: slices.Clone(defaultIndexPages),
-		NotPages:   slices.Clone(defaultNotPages),
-		ValidCodes: []int{http.StatusOK, http.StatusPartialContent, http.StatusNotModified},
+		IndexPages:   slices.Clone(defaultIndexPages),
+		NotPages:     slices.Clone(defaultNotPages),
+		ValidCodes:   []int{http.StatusOK, http.StatusPartialContent, http.StatusNotModified},
+		VisitTimeout: DefaultVisitTimeout,
 	}
 }
 
 // Batch holds in memory what applied events add, until DB.Flush writes it in one transaction.
 type Batch struct {
 	d       map[string]tally
-	index   []string // "/" and an index page name each
+	events  []sessEvent // in log order
+	index   []string    // "/" and an index page name each
 	loc     *time.Location
 	notPage map[string]bool
 	query   string // "?", which starts a query (RFC 3986, section 3.4), and the query separators
+	timeout time.Duration
 	u       map[string]*hyperloglog.Sketch
 	valid   map[int]bool
 }
@@ -87,13 +99,19 @@ type TimePoint struct {
 	Counts
 }
 
-// NewBatch returns an empty batch that counts by the rules of o, in the store's time zone.
+// NewBatch returns an empty batch that counts by the rules of o, in the store's time zone. It panics if o.VisitTimeout
+// is not positive.
 func (db *DB) NewBatch(o Options) *Batch {
+	if o.VisitTimeout <= 0 {
+		panic(fmt.Sprintf("kvstore: visit timeout %v is not positive", o.VisitTimeout))
+	}
+
 	b := &Batch{
 		d:       map[string]tally{},
 		loc:     db.loc,
 		notPage: setOf(o.NotPages...),
 		query:   "?" + o.QuerySeparators,
+		timeout: o.VisitTimeout,
 		u:       map[string]*hyperloglog.Sketch{},
 		valid:   map[int]bool{},
 	}
@@ -112,7 +130,8 @@ func (db *DB) NewBatch(o Options) *Batch {
 // Apply counts one event in its class: in its hour, its day and each dimension of hostKey(ev.Host). It adds a hit, a
 // page if the path is one, and its size as bandwidth. A 206 that does not start at byte 0 adds its size but no hit. A
 // path and a referrer count without their query, and an index page under its directory. A page also adds
-// clientKey(ev.ClientIP) to its month's unique visitors. A missing status, referrer or client adds nothing there.
+// clientKey(ev.ClientIP) to its month's unique visitors, and a correct one to the client's visits. A missing status,
+// referrer or client adds nothing there.
 func (b *Batch) Apply(ev logparse.Event) {
 	host := hostKey(ev.Host)
 	path := cutQuery(ev.Path, b.query)
@@ -151,7 +170,12 @@ func (b *Batch) Apply(ev logparse.Event) {
 	}
 
 	if ev.ClientIP != "" && c.Pages == 1 {
-		b.addUnique(host, ym, cl, clientKey(ev.ClientIP))
+		client := clientKey(ev.ClientIP)
+		b.addUnique(host, ym, cl, client)
+
+		if cl.group() == groupCorrect {
+			b.events = append(b.events, sessEvent{cl, host, client, clip(path), t})
+		}
 	}
 }
 
@@ -168,7 +192,12 @@ func (b *Batch) group(status int) int {
 }
 
 func (b *Batch) add(key []byte, cl class, c Counts) {
-	b.d[string(key)] = b.d[string(key)].add(cl, c)
+	addTo(b.d, key, cl, c)
+}
+
+// Adds c to the counters of class cl under key.
+func addTo(d map[string]tally, key []byte, cl class, c Counts) {
+	d[string(key)] = d[string(key)].add(cl, c)
 }
 
 // Reports whether a path asks for robots.txt, which crawlers do and browsers do not. The rule follows AWStats:
@@ -219,17 +248,27 @@ func clip(s string) string {
 	return s[:maxValueLen]
 }
 
-// Flush adds the batch to the stored counters and sketches in one transaction and empties it. On error nothing is
-// written and the batch is kept.
+// Flush adds the batch to the stored counters, sketches and sessions in one transaction and empties it. On error
+// nothing is written and the batch is kept.
 func (db *DB) Flush(b *Batch) error {
 	if len(b.d) == 0 {
 		return nil
 	}
 
 	err := db.b.Update(func(tx *bolt.Tx) error {
+		// The visits go to a copy, so a failed flush leaves the batch as it was.
+		d := make(map[string]tally, len(b.d))
+		for k, t := range b.d {
+			d[k] = slices.Clone(t)
+		}
+
+		if err := sessions(tx.Bucket(bktSess), db.salt, b, d); err != nil {
+			return err
+		}
+
 		agg := tx.Bucket(bktAgg)
 
-		for k, t := range b.d {
+		for k, t := range d {
 			sum := t
 
 			if v := agg.Get([]byte(k)); v != nil {
@@ -259,6 +298,7 @@ func (db *DB) Flush(b *Batch) error {
 
 	b.d = map[string]tally{}
 	b.u = map[string]*hyperloglog.Sketch{}
+	b.events = nil
 
 	return nil
 }
