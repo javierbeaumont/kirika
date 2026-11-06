@@ -113,11 +113,11 @@ func series(t *testing.T, db *DB, host, tag, period string, f Filter) []TimePoin
 	return s
 }
 
-// Stores a raw value under key in the agg bucket.
-func putRaw(t *testing.T, db *DB, key, v []byte) {
+// Stores a raw value under key in a bucket.
+func putRaw(t *testing.T, db *DB, bkt, key, v []byte) {
 	t.Helper()
 
-	err := db.b.Update(func(tx *bolt.Tx) error { return tx.Bucket(bktAgg).Put(key, v) })
+	err := db.b.Update(func(tx *bolt.Tx) error { return tx.Bucket(bkt).Put(key, v) })
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -602,10 +602,10 @@ func TestBandwidthCapped(t *testing.T) {
 	}
 }
 
-// A flush adds to the stored counters and empties the batch.
+// A flush adds to the stored counters and empties the batch, sketches included.
 func TestFlushAdds(t *testing.T) {
 	db := openStore(t)
-	ev := page("h", "/", 200, 3, base)
+	ev := from(ip(0), page("h", "/", 200, 3, base))
 
 	b := db.NewBatch(DefaultOptions())
 	b.Apply(ev)
@@ -613,6 +613,10 @@ func TestFlushAdds(t *testing.T) {
 	for range 2 {
 		if err := db.Flush(b); err != nil {
 			t.Fatalf("flush: %v", err)
+		}
+
+		if len(b.d) != 0 || len(b.u) != 0 {
+			t.Fatalf("the batch keeps %d counters and %d sketches after a flush", len(b.d), len(b.u))
 		}
 	}
 
@@ -627,8 +631,8 @@ func TestFlushAdds(t *testing.T) {
 // A corrupt stored value fails every read of it, and a flush onto it writes nothing and keeps the batch.
 func TestCorruptValue(t *testing.T) {
 	db := openStore(t)
-	putRaw(t, db, timeKey(tagDay, "bad", base.Format("20060102")), []byte{0})
-	putRaw(t, db, dimKey(tagURL, "bad", base.Format("200601"), "/"), []byte{0})
+	putRaw(t, db, bktAgg, timeKey(tagDay, "bad", base.Format("20060102")), []byte{0})
+	putRaw(t, db, bktAgg, dimKey(tagURL, "bad", base.Format("200601"), "/"), []byte{0})
 
 	if _, err := db.Totals("bad", "2000", Filter{}); !errors.Is(err, errBadValue) {
 		t.Errorf("Totals: err = %v, want errBadValue", err)
@@ -643,7 +647,7 @@ func TestCorruptValue(t *testing.T) {
 	}
 
 	b := db.NewBatch(DefaultOptions())
-	b.Apply(page("good", "/", 200, 1, base))
+	b.Apply(from(ip(0), page("good", "/", 200, 1, base)))
 	b.Apply(page("bad", "/", 200, 1, base))
 
 	if err := db.Flush(b); !errors.Is(err, errBadValue) {
@@ -654,9 +658,13 @@ func TestCorruptValue(t *testing.T) {
 		t.Errorf("Totals of good after the failed flush = %+v, want none", got)
 	}
 
+	if got := unique(t, db, "good", "2000", Filter{}); got != 0 {
+		t.Errorf("unique visitors of good after the failed flush = %d, want 0", got)
+	}
+
 	repaired := encodeTally(tally{{0, Counts{}}})
-	putRaw(t, db, timeKey(tagDay, "bad", base.Format("20060102")), repaired)
-	putRaw(t, db, dimKey(tagURL, "bad", base.Format("200601"), "/"), repaired)
+	putRaw(t, db, bktAgg, timeKey(tagDay, "bad", base.Format("20060102")), repaired)
+	putRaw(t, db, bktAgg, dimKey(tagURL, "bad", base.Format("200601"), "/"), repaired)
 
 	if err := db.Flush(b); err != nil {
 		t.Fatalf("Flush after the repair: %v", err)
@@ -664,6 +672,10 @@ func TestCorruptValue(t *testing.T) {
 
 	if got := totals(t, db, "good", "2000", Filter{}).Hits; got != 1 {
 		t.Errorf("hits of good after the repair = %d, want 1", got)
+	}
+
+	if got := unique(t, db, "good", "2000", Filter{}); got != 1 {
+		t.Errorf("unique visitors of good after the repair = %d, want 1", got)
 	}
 }
 

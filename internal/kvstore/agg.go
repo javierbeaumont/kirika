@@ -24,12 +24,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/axiomhq/hyperloglog"
 	"github.com/javierbeaumont/kirika/internal/logparse"
 	"github.com/javierbeaumont/kirika/internal/uaclass"
 	bolt "go.etcd.io/bbolt"
@@ -75,6 +77,7 @@ type Batch struct {
 	loc     *time.Location
 	notPage map[string]bool
 	query   string // "?", which starts a query (RFC 3986, section 3.4), and the query separators
+	u       map[string]*hyperloglog.Sketch
 	valid   map[int]bool
 }
 
@@ -91,6 +94,7 @@ func (db *DB) NewBatch(o Options) *Batch {
 		loc:     db.loc,
 		notPage: setOf(o.NotPages...),
 		query:   "?" + o.QuerySeparators,
+		u:       map[string]*hyperloglog.Sketch{},
 		valid:   map[int]bool{},
 	}
 
@@ -107,8 +111,8 @@ func (db *DB) NewBatch(o Options) *Batch {
 
 // Apply counts one event in its class: in its hour, its day and each dimension of hostKey(ev.Host). It adds a hit, a
 // page if the path is one, and its size as bandwidth. A 206 that does not start at byte 0 adds its size but no hit. A
-// path and a referrer count without their query, and an index page under its directory. A missing status or referrer
-// adds nothing there.
+// path and a referrer count without their query, and an index page under its directory. A page also adds
+// clientKey(ev.ClientIP) to its month's unique visitors. A missing status, referrer or client adds nothing there.
 func (b *Batch) Apply(ev logparse.Event) {
 	host := hostKey(ev.Host)
 	path := cutQuery(ev.Path, b.query)
@@ -144,6 +148,10 @@ func (b *Batch) Apply(ev logparse.Event) {
 
 	if ref := cutQuery(ev.Referer, b.query); ref != "" {
 		b.add(dimKey(tagRef, host, ym, clip(ref)), cl, c)
+	}
+
+	if ev.ClientIP != "" && c.Pages == 1 {
+		b.addUnique(host, ym, cl, clientKey(ev.ClientIP))
 	}
 }
 
@@ -186,6 +194,15 @@ func hostKey(host string) string {
 	return clip(strings.ToLower(host))
 }
 
+// Returns a client in one form: an IP in canonical text, a mapped IPv4 address as IPv4, and anything else in lowercase.
+func clientKey(client string) string {
+	if addr, err := netip.ParseAddr(client); err == nil {
+		return addr.Unmap().String()
+	}
+
+	return strings.ToLower(client)
+}
+
 // Cuts s to at most maxValueLen bytes without splitting a character: a cut inside one moves back to its start, at most
 // utf8.UTFMax-1 bytes. With no start there, s is not UTF-8 and is cut at maxValueLen.
 func clip(s string) string {
@@ -202,8 +219,8 @@ func clip(s string) string {
 	return s[:maxValueLen]
 }
 
-// Flush adds the batch to the stored counters in one transaction and empties it. On error nothing is written and the
-// batch is kept.
+// Flush adds the batch to the stored counters and sketches in one transaction and empties it. On error nothing is
+// written and the batch is kept.
 func (db *DB) Flush(b *Batch) error {
 	if len(b.d) == 0 {
 		return nil
@@ -234,13 +251,14 @@ func (db *DB) Flush(b *Batch) error {
 			}
 		}
 
-		return nil
+		return writeUnique(tx.Bucket(bktUniq), b.u)
 	})
 	if err != nil {
 		return err
 	}
 
 	b.d = map[string]tally{}
+	b.u = map[string]*hyperloglog.Sketch{}
 
 	return nil
 }
@@ -256,6 +274,20 @@ func compact(period string) (string, error) {
 	}
 
 	return "", fmt.Errorf("%w: %q", errBadPeriod, period)
+}
+
+// Returns the YYYYMM months of a compact date: twelve for a year, else the date's own month.
+func months(date string) []string {
+	if len(date) > 4 {
+		return []string{date[:6]}
+	}
+
+	out := make([]string, 0, 12)
+	for m := 1; m <= 12; m++ {
+		out = append(out, fmt.Sprintf("%s%02d", date, m))
+	}
+
+	return out
 }
 
 // Calls fn with the rest and the counters of each agg key that starts with prefix and holds a class f counts. The rest
@@ -317,19 +349,9 @@ func (db *DB) Dim(host, tag, period string, f Filter) (map[string]Counts, error)
 		return nil, err
 	}
 
-	var months []string
-
-	if len(date) == 4 {
-		for m := 1; m <= 12; m++ {
-			months = append(months, fmt.Sprintf("%s%02d", date, m))
-		}
-	} else {
-		months = []string{date[:6]}
-	}
-
 	out := map[string]Counts{}
 
-	for _, ym := range months {
+	for _, ym := range months(date) {
 		err := db.scan(encKey(tag, hostKey(host), ym), f, func(rest []byte, c Counts) {
 			sum := out[string(rest)]
 			sum.add(c)

@@ -97,8 +97,10 @@ func TestOpen(t *testing.T) {
 	defer closeStore(t, db)
 
 	err = db.b.View(func(tx *bolt.Tx) error {
-		if tx.Bucket(bktAgg) == nil {
-			t.Error("no agg bucket")
+		for _, name := range [][]byte{bktAgg, bktUniq} {
+			if tx.Bucket(name) == nil {
+				t.Errorf("no %s bucket", name)
+			}
 		}
 
 		if v := tx.Bucket(bktMeta).Get(metaSchema); !bytes.Equal(v, []byte{schemaVersion}) {

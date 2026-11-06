@@ -37,6 +37,7 @@ const schemaVersion = 1
 var (
 	bktAgg     = []byte("agg")
 	bktMeta    = []byte("meta")
+	bktUniq    = []byte("uniq")
 	metaSchema = []byte("schema")
 	metaZone   = []byte("zone")
 )
@@ -91,8 +92,10 @@ func (db *DB) Close() error {
 // Creates the buckets and writes the schema version and the time zone, or checks the stored ones.
 func (db *DB) init(zone string) error {
 	return db.b.Update(func(tx *bolt.Tx) error {
-		if _, err := tx.CreateBucketIfNotExists(bktAgg); err != nil {
-			return err
+		for _, name := range [][]byte{bktAgg, bktUniq} {
+			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
+				return err
+			}
 		}
 
 		meta, err := tx.CreateBucketIfNotExists(bktMeta)
