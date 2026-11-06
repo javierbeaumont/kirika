@@ -56,7 +56,7 @@ func page(host, path string, status int, size int64, t time.Time) logparse.Event
 func openStore(t *testing.T) *DB {
 	t.Helper()
 
-	db, err := Open(filepath.Join(t.TempDir(), "kirika.db"), time.Second)
+	db, err := Open(filepath.Join(t.TempDir(), "kirika.db"), time.Second, "UTC")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -70,7 +70,7 @@ func openStore(t *testing.T) *DB {
 func flush(t *testing.T, db *DB, evs ...logparse.Event) {
 	t.Helper()
 
-	b := NewBatch(DefaultOptions())
+	b := db.NewBatch(DefaultOptions())
 	for _, ev := range evs {
 		b.Apply(ev)
 	}
@@ -293,11 +293,86 @@ func TestPartialContent(t *testing.T) {
 	}
 }
 
+// Hours, days and months are those of the store's zone: the first instant of 2000 in each zone counts in its first hour
+// of 2000. The zones lie behind and ahead of UTC, by whole hours or not, and one is on daylight saving time.
+func TestZone(t *testing.T) {
+	hours := []TimePoint{{At: "2000010100", Counts: pageCounts(1, 1)}}
+
+	for _, tc := range []struct {
+		zone   string
+		offset time.Duration // from UTC, in January 2000
+	}{
+		{"America/New_York", -5 * time.Hour},
+		{"UTC", 0},
+		{"Europe/Madrid", time.Hour},
+		{"Asia/Kolkata", 5*time.Hour + 30*time.Minute},
+		{"Asia/Kathmandu", 5*time.Hour + 45*time.Minute},
+		{"Pacific/Auckland", 13 * time.Hour},
+	} {
+		db, err := Open(filepath.Join(t.TempDir(), "kirika.db"), time.Second, tc.zone)
+		if err != nil {
+			t.Fatalf("open in %s: %v", tc.zone, err)
+		}
+
+		flush(t, db, page("h", "/", 200, 1, base.Add(-tc.offset)))
+
+		if got := totals(t, db, "h", "2000", Filter{}).Hits; got != 1 {
+			t.Errorf("hits in 2000 in %s = %d, want 1", tc.zone, got)
+		}
+
+		if got := dim(t, db, "h", tagURL, "2000-01", Filter{})["/"].Hits; got != 1 {
+			t.Errorf("hits of / in January in %s = %d, want 1", tc.zone, got)
+		}
+
+		if got := series(t, db, "h", tagHour, "2000-01-01", Filter{}); !reflect.DeepEqual(got, hours) {
+			t.Errorf("hours in %s = %+v, want %+v", tc.zone, got, hours)
+		}
+
+		closeStore(t, db)
+	}
+}
+
+// A daylight saving change merges two hours into one or leaves one empty. In Madrid, the clock goes back from 03:00 to
+// 02:00 on the last Sunday of October, and forward from 02:00 to 03:00 on the last Sunday of March, both at 01:00 UTC.
+func TestDaylightSaving(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "kirika.db"), time.Second, "Europe/Madrid")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	t.Cleanup(func() { closeStore(t, db) })
+
+	back, forward := base.AddDate(0, 9, 28), base.AddDate(0, 2, 25)
+	flush(t, db,
+		page("h", "/", 200, 1, back.Add(30*time.Minute)),
+		page("h", "/", 200, 1, back.Add(90*time.Minute)),
+		page("h", "/", 200, 1, forward.Add(30*time.Minute)),
+		page("h", "/", 200, 1, forward.Add(90*time.Minute)),
+	)
+
+	for _, tc := range []struct {
+		day   time.Time
+		hours map[string]int64
+	}{
+		{back, map[string]int64{"02": 2}},
+		{forward, map[string]int64{"01": 1, "03": 1}},
+	} {
+		got := map[string]int64{}
+		for _, p := range series(t, db, "h", tagHour, tc.day.Format("2006-01-02"), Filter{}) {
+			got[p.At[8:]] = p.Hits
+		}
+
+		if !reflect.DeepEqual(got, tc.hours) {
+			t.Errorf("hits per hour of %s = %v, want %v", tc.day.Format("January"), got, tc.hours)
+		}
+	}
+}
+
 // The valid codes are an option: with only 200, a 304 is another status.
 func TestValidCodes(t *testing.T) {
 	db := openStore(t)
 
-	b := NewBatch(Options{ValidCodes: []int{200}})
+	b := db.NewBatch(Options{ValidCodes: []int{200}})
 	b.Apply(page("h", "/", 200, 1, base))
 	b.Apply(page("h", "/", 304, 2, base))
 
@@ -329,7 +404,7 @@ func TestIndexPages(t *testing.T) {
 		t.Errorf("Dim with the default index pages = %+v, want %+v", got, want)
 	}
 
-	b := NewBatch(Options{IndexPages: []string{"default.htm", "index.png"}, ValidCodes: []int{200}})
+	b := db.NewBatch(Options{IndexPages: []string{"default.htm", "index.png"}, ValidCodes: []int{200}})
 	for _, path := range []string{"/default.htm", "/index.html", "/index.png"} {
 		b.Apply(page("o", path, 200, 1, base))
 	}
@@ -386,7 +461,7 @@ func TestQuerySeparators(t *testing.T) {
 		t.Errorf("Dim of referrers by default = %+v, want %+v", got, want)
 	}
 
-	b := NewBatch(Options{IndexPages: []string{"index.html"}, QuerySeparators: ";", ValidCodes: []int{200}})
+	b := db.NewBatch(Options{IndexPages: []string{"index.html"}, QuerySeparators: ";", ValidCodes: []int{200}})
 
 	for _, path := range []string{"/app;s=1", "/index.html;s=1", "/logo.png;v=2", "/robots.txt;s=1"} {
 		ev := page("o", path, 200, 1, base)
@@ -532,7 +607,7 @@ func TestFlushAdds(t *testing.T) {
 	db := openStore(t)
 	ev := page("h", "/", 200, 3, base)
 
-	b := NewBatch(DefaultOptions())
+	b := db.NewBatch(DefaultOptions())
 	b.Apply(ev)
 
 	for range 2 {
@@ -567,7 +642,7 @@ func TestCorruptValue(t *testing.T) {
 		t.Errorf("Dim: err = %v, want errBadValue", err)
 	}
 
-	b := NewBatch(DefaultOptions())
+	b := db.NewBatch(DefaultOptions())
 	b.Apply(page("good", "/", 200, 1, base))
 	b.Apply(page("bad", "/", 200, 1, base))
 

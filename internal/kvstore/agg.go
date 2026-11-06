@@ -38,8 +38,8 @@ import (
 // The most bytes kept of a host or a dimension value from the log.
 const maxValueLen = 1024
 
-// Tags open every key in the agg bucket. A time series key is encKey(tag, host) + its UTC date; a dimension key is
-// encKey(tag, host, YYYYMM) + its value.
+// Tags open every key in the agg bucket. A time series key is encKey(tag, host) + its date in the store's zone; a
+// dimension key is encKey(tag, host, YYYYMM) + its value.
 const (
 	tagHour = "th" // YYYYMMDDHH
 	tagDay  = "td" // YYYYMMDD
@@ -72,6 +72,7 @@ func DefaultOptions() Options {
 type Batch struct {
 	d       map[string]tally
 	index   []string // "/" and an index page name each
+	loc     *time.Location
 	notPage map[string]bool
 	query   string // "?", which starts a query (RFC 3986, section 3.4), and the query separators
 	valid   map[int]bool
@@ -79,14 +80,15 @@ type Batch struct {
 
 // TimePoint is one bucket of a time series.
 type TimePoint struct {
-	At string // UTC date, YYYYMMDD or YYYYMMDDHH
+	At string // date in the store's zone, YYYYMMDD or YYYYMMDDHH
 	Counts
 }
 
-// NewBatch returns an empty batch that counts by the rules of o.
-func NewBatch(o Options) *Batch {
+// NewBatch returns an empty batch that counts by the rules of o, in the store's time zone.
+func (db *DB) NewBatch(o Options) *Batch {
 	b := &Batch{
 		d:       map[string]tally{},
+		loc:     db.loc,
 		notPage: setOf(o.NotPages...),
 		query:   "?" + o.QuerySeparators,
 		valid:   map[int]bool{},
@@ -128,10 +130,11 @@ func (b *Batch) Apply(ev logparse.Event) {
 		path = fold(path, b.index)
 	}
 
-	b.add(timeKey(tagHour, host, ev.Time.Format("2006010215")), cl, c)
-	b.add(timeKey(tagDay, host, ev.Time.Format("20060102")), cl, c)
+	t := ev.Time.In(b.loc)
+	b.add(timeKey(tagHour, host, t.Format("2006010215")), cl, c)
+	b.add(timeKey(tagDay, host, t.Format("20060102")), cl, c)
 
-	ym := ev.Time.Format("200601")
+	ym := t.Format("200601")
 	b.add(dimKey(tagURL, host, ym, clip(path)), cl, c)
 	b.add(dimKey(tagCli, host, ym, client), cl, c)
 
