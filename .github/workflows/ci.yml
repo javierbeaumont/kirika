@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: Build and test
+    name: Build and vet
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repository
@@ -36,8 +36,30 @@ jobs:
       - name: Vet
         run: make vet
 
+  test:
+    name: Test (${{ matrix.tier }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [unit, integration]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Log in to Docker Hub
+        env:
+          DOCKERHUB_PULL_TOKEN: ${{ secrets.DOCKERHUB_PULL_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ github.repository_owner }}
+        run: |
+          if [ -n "$DOCKERHUB_PULL_TOKEN" ]; then
+            echo "$DOCKERHUB_PULL_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+          fi
+
       - name: Test
-        run: make test
+        run: make test-${{ matrix.tier }}
 
   pre-commit:
     name: pre-commit

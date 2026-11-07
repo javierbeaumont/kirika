@@ -17,6 +17,8 @@
 // You should have received a copy of the GNU General Public License
 // along with kirika. If not, see <https://www.gnu.org/licenses/>.
 
+//go:build unit
+
 package kvstore
 
 import "testing"
@@ -33,7 +35,7 @@ func TestExtension(t *testing.T) {
 		"/a.abcdefg":  "",
 		"/a.b_9":      "b_9",
 		"/a.b-c":      "",
-		"/a.ñ":        "",
+		"/a.\u00f1":   "",
 		"/v1.2/docs":  "",
 		"/x.tar.gz":   "gz",
 		"/.htaccess":  "",

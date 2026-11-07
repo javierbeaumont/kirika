@@ -39,6 +39,24 @@ repos:
         types: [go]
         pass_filenames: false
         require_serial: true
+      - id: test-helpers
+        name: test files outside a tier hold no test
+        entry: '^func (Test|Benchmark|Fuzz|Example)'
+        language: pygrep
+        files: '_test\.go$'
+        exclude: '_(unit|integration)_test\.go$'
+      - id: unit-tag
+        name: unit test files carry the unit tag
+        entry: '^//go:build unit$'
+        language: pygrep
+        args: [--negate]
+        files: '_unit_test\.go$'
+      - id: integration-tag
+        name: integration test files carry the integration tag
+        entry: '^//go:build integration$'
+        language: pygrep
+        args: [--negate]
+        files: '_integration_test\.go$'
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
     hooks:

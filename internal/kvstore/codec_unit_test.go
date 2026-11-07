@@ -17,6 +17,8 @@
 // You should have received a copy of the GNU General Public License
 // along with kirika. If not, see <https://www.gnu.org/licenses/>.
 
+//go:build unit
+
 package kvstore
 
 import (

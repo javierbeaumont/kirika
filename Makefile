@@ -20,8 +20,10 @@
 GO := docker compose run --rm go
 # No TTY: pre-commit gives hooks no terminal on stdin, which older Compose versions do not detect.
 LINT := docker compose run --rm -T lint
+# The test tiers, each the build tag of its test files.
+TIERS := unit integration
 
-.PHONY: build clean fmt lint sh test vet
+.PHONY: build clean fmt lint sh test test-integration test-unit vet
 
 build:
 	$(GO) go build ./...
@@ -35,13 +37,16 @@ fmt:
 
 # Applies the fixes the linters can make.
 lint:
-	$(LINT) golangci-lint run --fix
+	$(LINT) sh -c 'for tier in $(TIERS); do golangci-lint run --fix --build-tags $$tier || exit; done'
 
 sh:
 	$(GO) sh
 
-test:
-	$(GO) go test ./...
+test: $(TIERS:%=test-%)
+
+# Also prints how many tests the tier has.
+$(TIERS:%=test-%): test-%:
+	$(GO) sh -c 'go test -tags $* ./... && echo "$*: $$(go test -tags $* -list . ./... | grep -c ^Test) tests"'
 
 vet:
-	$(GO) go vet ./...
+	$(GO) sh -c 'for tier in $(TIERS); do go vet -tags $$tier ./... || exit; done'

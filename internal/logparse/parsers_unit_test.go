@@ -17,15 +17,18 @@
 // You should have received a copy of the GNU General Public License
 // along with kirika. If not, see <https://www.gnu.org/licenses/>.
 
+//go:build unit
+
 package logparse
 
 import "testing"
 
-// TestByName checks that each name returns its own parser, by parsing a line only that format accepts.
+// Each name returns its own parser, which parses a line only that format accepts. Any other name is an error, the names
+// in upper case included.
 func TestByName(t *testing.T) {
 	for name, line := range map[string][]byte{
 		"caddy-json": caddyRequest(`"host":"example.com"`),
-		"ncsa":       []byte(`192.0.2.1 - - [03/Jul/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 1`),
+		"ncsa":       []byte(`192.0.2.1 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1`),
 	} {
 		p, err := ByName(name)
 		if err != nil {
