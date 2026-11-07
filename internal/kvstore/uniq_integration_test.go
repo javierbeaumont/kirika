@@ -24,32 +24,13 @@ package kvstore
 import (
 	"bytes"
 	"errors"
-	"math"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/javierbeaumont/kirika/internal/logparse"
 	bolt "go.etcd.io/bbolt"
 )
-
-// Returns ev as made by client.
-func from(client string, ev logparse.Event) logparse.Event {
-	ev.ClientIP = client
-
-	return ev
-}
-
-// Returns the page requests of host from the clients first to last-1 at t.
-func visits(host string, first, last int, t time.Time) []logparse.Event {
-	evs := make([]logparse.Event, 0, last-first)
-	for i := first; i < last; i++ {
-		evs = append(evs, from(ip(i), page(host, "/", 200, 1, t)))
-	}
-
-	return evs
-}
 
 func unique(t *testing.T, db *DB, host, period string, f Filter) uint64 {
 	t.Helper()
@@ -60,51 +41,6 @@ func unique(t *testing.T, db *DB, host, period string, f Filter) uint64 {
 	}
 
 	return n
-}
-
-// Reports whether got is within 5% of want, three times the sketch's standard error.
-func near(got uint64, want int) bool {
-	return math.Abs(float64(got)-float64(want)) <= 0.05*float64(want)
-}
-
-// A client counts once, from its first page, under any case of the host. A request with no page or no client adds
-// nothing, and hosts and months are counted apart.
-func TestUnique(t *testing.T) {
-	db := openStore(t)
-	next := base.AddDate(0, 1, 0)
-
-	evs := visits("h", 0, 1000, at(1, 0))
-	evs = append(evs, visits("H", 0, 1000, at(2, 0))...)
-	evs = append(evs, visits("other", 1000, 2000, at(1, 0))...)
-	evs = append(evs, visits("h", 1000, 2000, next)...)
-	evs = append(evs,
-		page("no-client", "/", 200, 1, base),
-		from(ip(0), page("files", "/logo.png", 200, 1, base)),
-		from(ip(0), page("mixed", "/logo.png", 200, 1, base)),
-		from(ip(0), page("mixed", "/", 200, 1, base)),
-		from(ip(1), page("mixed", "/app.css", 200, 1, base)),
-	)
-	flush(t, db, evs...)
-
-	for _, tc := range []struct {
-		host, period string
-		want         int
-	}{
-		{"h", "2000-01", 1000},
-		{"H", "2000-01", 1000},
-		{"no-client", "2000-01", 0},
-		{"files", "2000-01", 0},
-		{"mixed", "2000-01", 1},
-		{"other", "2000-01", 1000},
-		{"h", next.Format("2006-01"), 1000},
-		{"h", "2000", 2000},
-		{"h", next.AddDate(0, 1, 0).Format("2006-01"), 0},
-		{"none", "2000", 0},
-	} {
-		if got := unique(t, db, tc.host, tc.period, Filter{}); !near(got, tc.want) {
-			t.Errorf("Unique(%q, %q) = %d, want about %d", tc.host, tc.period, got, tc.want)
-		}
-	}
 }
 
 // A client counts in the class of each of its pages, and once under a filter that takes several of them. The kind of a
@@ -173,24 +109,6 @@ func TestUniqueHosts(t *testing.T) {
 		if got, err := db.Unique("2000", Filter{}, tc.hosts...); err != nil || !near(got, tc.want) {
 			t.Errorf("Unique of %q = %d, %v; want about %d", tc.hosts, got, err, tc.want)
 		}
-	}
-}
-
-// A client counts once in any of its forms.
-func TestUniqueClientForms(t *testing.T) {
-	db := openStore(t)
-
-	var evs []logparse.Event
-	for _, c := range []string{
-		"192.0.2.1", "::ffff:192.0.2.1", "2001:db8::1", "2001:DB8:0:0:0:0:0:1", "a.example", "A.Example",
-	} {
-		evs = append(evs, from(c, page("h", "/", 200, 1, base)))
-	}
-
-	flush(t, db, evs...)
-
-	if got := unique(t, db, "h", "2000-01", Filter{}); got != 3 {
-		t.Errorf("Unique = %d, want 3", got)
 	}
 }
 

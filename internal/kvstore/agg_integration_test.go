@@ -26,7 +26,6 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -34,22 +33,6 @@ import (
 	"github.com/javierbeaumont/kirika/internal/logparse"
 	bolt "go.etcd.io/bbolt"
 )
-
-const (
-	botUA     = "Googlebot/2.1"
-	desktopUA = "Mozilla/5.0 (X11; Linux x86_64)"
-	mobileUA  = "Mozilla/5.0 (iPhone)"
-)
-
-// Returns hour h of day d of January 2000.
-func at(d, h int) time.Time {
-	return base.AddDate(0, 0, d-1).Add(time.Duration(h) * time.Hour)
-}
-
-// Returns a request of host for path from a desktop browser, answered with status and size at t.
-func page(host, path string, status int, size int64, t time.Time) logparse.Event {
-	return logparse.Event{Host: host, Path: path, Status: status, Size: size, Time: t, UserAgent: desktopUA}
-}
 
 // Returns a store in a fresh directory, closed when the test ends.
 func openStore(t *testing.T) *DB {
@@ -122,11 +105,6 @@ func putRaw(t *testing.T, db *DB, bkt, key, v []byte) {
 	}
 }
 
-// Returns the counters of n page hits of size bytes in all.
-func pageCounts(n, size int64) Counts {
-	return Counts{HitBandwidth: size, Hits: n, PageBandwidth: size, Pages: n}
-}
-
 // Returns c with v visits.
 func withVisits(c Counts, v int64) Counts {
 	c.Visits = v
@@ -134,8 +112,9 @@ func withVisits(c Counts, v int64) Counts {
 	return c
 }
 
-// Checks every counter, time series and dimension of a set of human requests in the default view.
-func TestApply(t *testing.T) {
+// Totals, Series and Dim read what flushes stored: a host's counters over a year, a month or a day, its days or hours
+// in date order, and a month's values of each dimension. An empty host reads the unknown one.
+func TestReads(t *testing.T) {
 	db := openStore(t)
 	referred := page("a.example", "/", 200, 10, at(1, 10))
 	referred.Referer = "https://r.example/"
@@ -201,310 +180,6 @@ func TestApply(t *testing.T) {
 		if got := dim(t, db, "a.example", tc.tag, "2000-01", Filter{}); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("Dim(%q, January) = %+v, want %+v", tc.tag, got, tc.want)
 		}
-	}
-}
-
-// Returns the counters stored under key, per class.
-func stored(t *testing.T, db *DB, key []byte) tally {
-	t.Helper()
-
-	var tl tally
-
-	err := db.b.View(func(tx *bolt.Tx) error {
-		var err error
-
-		tl, err = decodeTally(tx.Bucket(bktAgg).Get(key))
-
-		return err
-	})
-	if err != nil {
-		t.Fatalf("read %q: %v", key, err)
-	}
-
-	return tl
-}
-
-// Checks the class each request is counted in, and its client kind.
-func TestClasses(t *testing.T) {
-	ua := func(ev logparse.Event, ua string) logparse.Event {
-		ev.UserAgent = ua
-
-		return ev
-	}
-
-	for _, tc := range []struct {
-		name  string
-		ev    logparse.Event
-		bot   bool
-		group int
-	}{
-		{"200", page("h", "/", 200, 1, base), false, groupCorrect},
-		{"206", page("h", "/", 206, 1, base), false, groupCorrect},
-		{"304", page("h", "/", 304, 1, base), false, groupCorrect},
-		{"100", page("h", "/", 100, 1, base), false, groupOther},
-		{"204", page("h", "/", 204, 1, base), false, groupOther},
-		{"301", page("h", "/", 301, 1, base), false, groupOther},
-		{"399", page("h", "/", 399, 1, base), false, groupOther},
-		{"400", page("h", "/", 400, 1, base), false, groupError},
-		{"500", page("h", "/", 500, 1, base), false, groupError},
-		{"999", page("h", "/", 999, 1, base), false, groupError},
-		{"no status", page("h", "/", 0, 1, base), false, groupError},
-		{"bot marker", ua(page("h", "/", 200, 1, base), botUA), true, groupCorrect},
-		{"empty user agent", ua(page("h", "/", 404, 1, base), ""), true, groupError},
-		{"robots.txt", page("h", "/robots.txt", 200, 1, base), true, groupCorrect},
-		{"robots.txt in any case", page("h", "/x/ROBOTS.TXT", 200, 1, base), true, groupCorrect},
-		{"robots.txt as a prefix", page("h", "/robots.txt.bak", 200, 1, base), false, groupCorrect},
-	} {
-		db := openStore(t)
-		flush(t, db, tc.ev)
-
-		got := stored(t, db, timeKey(tagDay, "h", base.Format("20060102")))
-		if want := newClass(tc.bot, tc.group); len(got) != 1 || got[0].class != want {
-			t.Errorf("%s: counted in %+v, want class %d only", tc.name, got, want)
-		}
-
-		client := "desktop"
-		if tc.bot {
-			client = "bot"
-		}
-
-		all := Filter{Audience: AllAudiences, Status: AllStatuses}
-		if got := dim(t, db, "h", tagCli, "2000", all); len(got) != 1 || got[client].HitBandwidth != 1 {
-			t.Errorf("%s: clients = %+v, want %s", tc.name, got, client)
-		}
-
-		statuses := dim(t, db, "h", tagStat, "2000", all)
-		if want := strconv.Itoa(tc.ev.Status); tc.ev.Status == 0 && len(statuses) != 0 ||
-			tc.ev.Status != 0 && (len(statuses) != 1 || statuses[want].HitBandwidth != 1) {
-			t.Errorf("%s: statuses = %+v, want %q only, or none without a status", tc.name, statuses, want)
-		}
-	}
-}
-
-// A 206 counts a hit only when it starts at byte 0, and its bytes always.
-func TestPartialContent(t *testing.T) {
-	db := openStore(t)
-	first := page("h", "/v.mp4", 206, 100, base)
-	first.FirstPart = true
-	flush(t, db,
-		first,
-		page("h", "/v.mp4", 206, 50, base),
-		page("h", "/doc", 206, 30, base),
-		page("h", "/x.mp4", 200, 5, base),
-	)
-
-	want := Counts{HitBandwidth: 185, Hits: 2, PageBandwidth: 30}
-	if got := totals(t, db, "h", "2000", Filter{}); got != want {
-		t.Errorf("Totals = %+v, want %+v", got, want)
-	}
-}
-
-// Hours, days and months are those of the store's zone: the first instant of 2000 in each zone counts in its first hour
-// of 2000. The zones lie behind and ahead of UTC, by whole hours or not, and one is on daylight saving time.
-func TestZone(t *testing.T) {
-	hours := []TimePoint{{At: "2000010100", Counts: pageCounts(1, 1)}}
-
-	for _, tc := range []struct {
-		zone   string
-		offset time.Duration // from UTC, in January 2000
-	}{
-		{"America/New_York", -5 * time.Hour},
-		{"UTC", 0},
-		{"Europe/Madrid", time.Hour},
-		{"Asia/Kolkata", 5*time.Hour + 30*time.Minute},
-		{"Asia/Kathmandu", 5*time.Hour + 45*time.Minute},
-		{"Pacific/Auckland", 13 * time.Hour},
-	} {
-		db, err := Open(filepath.Join(t.TempDir(), "kirika.db"), time.Second, tc.zone)
-		if err != nil {
-			t.Fatalf("open in %s: %v", tc.zone, err)
-		}
-
-		flush(t, db, page("h", "/", 200, 1, base.Add(-tc.offset)))
-
-		if got := totals(t, db, "h", "2000", Filter{}).Hits; got != 1 {
-			t.Errorf("hits in 2000 in %s = %d, want 1", tc.zone, got)
-		}
-
-		if got := dim(t, db, "h", tagURL, "2000-01", Filter{})["/"].Hits; got != 1 {
-			t.Errorf("hits of / in January in %s = %d, want 1", tc.zone, got)
-		}
-
-		if got := series(t, db, "h", tagHour, "2000-01-01", Filter{}); !reflect.DeepEqual(got, hours) {
-			t.Errorf("hours in %s = %+v, want %+v", tc.zone, got, hours)
-		}
-
-		closeStore(t, db)
-	}
-}
-
-// A daylight saving change merges two hours into one or leaves one empty. In Madrid, the clock goes back from 03:00 to
-// 02:00 on the last Sunday of October, and forward from 02:00 to 03:00 on the last Sunday of March, both at 01:00 UTC.
-func TestDaylightSaving(t *testing.T) {
-	db, err := Open(filepath.Join(t.TempDir(), "kirika.db"), time.Second, "Europe/Madrid")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-
-	t.Cleanup(func() { closeStore(t, db) })
-
-	back, forward := base.AddDate(0, 9, 28), base.AddDate(0, 2, 25)
-	flush(t, db,
-		page("h", "/", 200, 1, back.Add(30*time.Minute)),
-		page("h", "/", 200, 1, back.Add(90*time.Minute)),
-		page("h", "/", 200, 1, forward.Add(30*time.Minute)),
-		page("h", "/", 200, 1, forward.Add(90*time.Minute)),
-	)
-
-	for _, tc := range []struct {
-		day   time.Time
-		hours map[string]int64
-	}{
-		{back, map[string]int64{"02": 2}},
-		{forward, map[string]int64{"01": 1, "03": 1}},
-	} {
-		got := map[string]int64{}
-		for _, p := range series(t, db, "h", tagHour, tc.day.Format("2006-01-02"), Filter{}) {
-			got[p.At[8:]] = p.Hits
-		}
-
-		if !reflect.DeepEqual(got, tc.hours) {
-			t.Errorf("hits per hour of %s = %v, want %v", tc.day.Format("January"), got, tc.hours)
-		}
-	}
-}
-
-// The valid codes are an option: with only 200, a 304 is another status.
-func TestValidCodes(t *testing.T) {
-	db := openStore(t)
-
-	b := db.NewBatch(Options{ValidCodes: []int{200}, VisitTimeout: DefaultVisitTimeout})
-	b.Apply(page("h", "/", 200, 1, base))
-	b.Apply(page("h", "/", 304, 2, base))
-
-	if err := db.Flush(b); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-
-	if got := totals(t, db, "h", "2000", Filter{}); got != pageCounts(1, 1) {
-		t.Errorf("Totals = %+v, want the 200 only", got)
-	}
-
-	if got := totals(t, db, "h", "2000", Filter{Status: AllStatuses}); got != pageCounts(2, 3) {
-		t.Errorf("Totals of every status = %+v, want both", got)
-	}
-}
-
-// An index page counts under its directory, with the default index pages or others, and a file never does.
-func TestIndexPages(t *testing.T) {
-	db := openStore(t)
-	flush(t, db,
-		page("h", "/", 200, 1, base),
-		page("h", "/index.html", 200, 1, base),
-		page("h", "/blog/index.php", 200, 1, base),
-		page("h", "/myindex.html", 200, 1, base),
-	)
-
-	want := map[string]Counts{"/": pageCounts(2, 2), "/blog/": pageCounts(1, 1), "/myindex.html": pageCounts(1, 1)}
-	if got := dim(t, db, "h", tagURL, "2000", Filter{}); !reflect.DeepEqual(got, want) {
-		t.Errorf("Dim with the default index pages = %+v, want %+v", got, want)
-	}
-
-	b := db.NewBatch(Options{
-		IndexPages: []string{"default.htm", "index.png"}, ValidCodes: []int{200}, VisitTimeout: DefaultVisitTimeout,
-	})
-	for _, path := range []string{"/default.htm", "/index.html", "/index.png"} {
-		b.Apply(page("o", path, 200, 1, base))
-	}
-
-	if err := db.Flush(b); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-
-	want = map[string]Counts{
-		"/":           pageCounts(1, 1),
-		"/index.html": pageCounts(1, 1),
-		"/index.png":  {HitBandwidth: 1, Hits: 1},
-	}
-	if got := dim(t, db, "o", tagURL, "2000", Filter{}); !reflect.DeepEqual(got, want) {
-		t.Errorf("Dim with default.htm and index.png = %+v, want %+v", got, want)
-	}
-}
-
-// A referrer counts without its query, and not at all when nothing else is left.
-func TestReferrerQuery(t *testing.T) {
-	db := openStore(t)
-
-	var evs []logparse.Event
-
-	for _, ref := range []string{"https://r.example/p?q=1", "https://r.example/p", "?q=1"} {
-		ev := page("h", "/", 200, 1, base)
-		ev.Referer = ref
-		evs = append(evs, ev)
-	}
-
-	flush(t, db, evs...)
-
-	want := map[string]Counts{"https://r.example/p": pageCounts(2, 2)}
-	if got := dim(t, db, "h", tagRef, "2000", Filter{}); !reflect.DeepEqual(got, want) {
-		t.Errorf("Dim of referrers = %+v, want %+v", got, want)
-	}
-}
-
-// A query starts only at "?" by default, and also at an added separator. A path loses its query before it is told a
-// page, an index page or robots.txt.
-func TestQuerySeparators(t *testing.T) {
-	db := openStore(t)
-	ev := page("h", "/app;s=1", 200, 1, base)
-	ev.Referer = "https://r.example/p;s=1"
-	flush(t, db, ev)
-
-	want := map[string]Counts{"/app;s=1": pageCounts(1, 1)}
-	if got := dim(t, db, "h", tagURL, "2000", Filter{}); !reflect.DeepEqual(got, want) {
-		t.Errorf("Dim of paths by default = %+v, want %+v", got, want)
-	}
-
-	want = map[string]Counts{"https://r.example/p;s=1": pageCounts(1, 1)}
-	if got := dim(t, db, "h", tagRef, "2000", Filter{}); !reflect.DeepEqual(got, want) {
-		t.Errorf("Dim of referrers by default = %+v, want %+v", got, want)
-	}
-
-	b := db.NewBatch(Options{
-		IndexPages:      []string{"index.html"},
-		QuerySeparators: ";",
-		ValidCodes:      []int{200},
-		VisitTimeout:    DefaultVisitTimeout,
-	})
-
-	for _, path := range []string{"/app;s=1", "/index.html;s=1", "/logo.png;v=2", "/robots.txt;s=1"} {
-		ev := page("o", path, 200, 1, base)
-		ev.Referer = "https://r.example/p;s=1"
-		b.Apply(ev)
-	}
-
-	if err := db.Flush(b); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-
-	all := Filter{Audience: AllAudiences}
-	want = map[string]Counts{
-		"/":           pageCounts(1, 1),
-		"/app":        pageCounts(1, 1),
-		"/logo.png":   {HitBandwidth: 1, Hits: 1},
-		"/robots.txt": {HitBandwidth: 1, Hits: 1},
-	}
-
-	if got := dim(t, db, "o", tagURL, "2000", all); !reflect.DeepEqual(got, want) {
-		t.Errorf("Dim of paths with ; = %+v, want %+v", got, want)
-	}
-
-	if got := dim(t, db, "o", tagCli, "2000", all)["bot"].Hits; got != 1 {
-		t.Errorf("bot hits with ; = %d, want 1 for robots.txt", got)
-	}
-
-	want = map[string]Counts{"https://r.example/p": {HitBandwidth: 4, Hits: 4, PageBandwidth: 2, Pages: 2}}
-	if got := dim(t, db, "o", tagRef, "2000", all); !reflect.DeepEqual(got, want) {
-		t.Errorf("Dim of referrers with ; = %+v, want %+v", got, want)
 	}
 }
 
@@ -636,11 +311,11 @@ func TestHostListCorrupt(t *testing.T) {
 	}
 }
 
-// Bandwidth is capped at math.MaxInt64, within a batch and across flushes.
-func TestBandwidthCapped(t *testing.T) {
+// Bandwidth is capped at math.MaxInt64 across flushes.
+func TestBandwidthCappedAcrossFlushes(t *testing.T) {
 	db := openStore(t)
 	ev := page("h", "/", 200, math.MaxInt64, base)
-	flush(t, db, ev, ev)
+	flush(t, db, ev)
 	flush(t, db, ev)
 
 	got := totals(t, db, "h", "2000", Filter{})
@@ -771,37 +446,5 @@ func TestBadFilter(t *testing.T) {
 
 	if _, err := db.Dim("h", tagURL, "2000", bad); !errors.Is(err, errBadFilter) {
 		t.Errorf("Dim: err = %v, want errBadFilter", err)
-	}
-}
-
-func TestClip(t *testing.T) {
-	ascii := "/" + strings.Repeat("x", 2*maxValueLen)
-
-	for _, tc := range []struct {
-		name, s string
-		want    int
-	}{
-		{"ASCII", ascii, maxValueLen},
-		{"a value at the limit", strings.Repeat("x", maxValueLen), maxValueLen},
-		// After "/", byte maxValueLen is the second of a 2-byte character and the fourth of a 4-byte one. In the bytes
-		// that are not UTF-8, the last "/" before it is 4 bytes back, too far to start a character that holds it.
-		{"2-byte characters", "/" + strings.Repeat("\u00f1", maxValueLen), maxValueLen - 1},
-		{"4-byte characters", "/" + strings.Repeat("\U0001F600", maxValueLen), maxValueLen - 3},
-		{"bytes that are not UTF-8", strings.Repeat("/\x80\x80\x80\x80", maxValueLen), maxValueLen},
-	} {
-		if got := clip(tc.s); got != tc.s[:tc.want] {
-			t.Errorf("clip of %s is %d bytes, want %d", tc.name, len(got), tc.want)
-		}
-	}
-
-	db := openStore(t)
-	ev := page("h", ascii, 200, 1, base)
-	ev.Referer = ascii
-	flush(t, db, ev)
-
-	for _, tag := range []string{tagURL, tagRef} {
-		if got := dim(t, db, "h", tag, "2000-01", Filter{}); got[ascii[:maxValueLen]].Hits != 1 {
-			t.Errorf("Dim(%q) = %d values, want the clipped one", tag, len(got))
-		}
 	}
 }

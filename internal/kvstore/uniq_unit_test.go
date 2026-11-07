@@ -24,7 +24,59 @@ package kvstore
 import (
 	"bytes"
 	"testing"
+
+	"github.com/javierbeaumont/kirika/internal/logparse"
 )
+
+// Returns the estimate of each of the batch's sketches, by key.
+func estimates(b *Batch) map[string]uint64 {
+	out := map[string]uint64{}
+	for k, sk := range b.u {
+		out[k] = sk.Estimate()
+	}
+
+	return out
+}
+
+// A client counts once, from its first page, in the sketch of its host in any case, its month and its class. A request
+// with no page or no client adds nothing.
+func TestUnique(t *testing.T) {
+	next := base.AddDate(0, 1, 0)
+
+	evs := visits("h", 0, 1000, at(1, 0))
+	evs = append(evs, visits("H", 0, 1000, at(2, 0))...)
+	evs = append(evs, visits("other", 1000, 2000, at(1, 0))...)
+	evs = append(evs, visits("h", 1000, 2000, next)...)
+	evs = append(evs,
+		page("no-client", "/", 200, 1, base),
+		from(ip(0), page("files", "/logo.png", 200, 1, base)),
+		from(ip(0), page("mixed", "/logo.png", 200, 1, base)),
+		from(ip(0), page("mixed", "/", 200, 1, base)),
+		from(ip(1), page("mixed", "/app.css", 200, 1, base)),
+	)
+
+	human := newClass(false, groupCorrect)
+	jan, feb := base.Format("200601"), next.Format("200601")
+	want := map[string]int{
+		string(uniqKey("h", jan, human)):     1000,
+		string(uniqKey("h", feb, human)):     1000,
+		string(uniqKey("mixed", jan, human)): 1,
+		string(uniqKey("other", jan, human)): 1000,
+	}
+
+	got := estimates(applied(evs...))
+	for k, n := range want {
+		if !near(got[k], n) {
+			t.Errorf("sketch %q = %d, want about %d", k, got[k], n)
+		}
+	}
+
+	for k, n := range got {
+		if _, ok := want[k]; !ok {
+			t.Errorf("sketch %q = %d, want none", k, n)
+		}
+	}
+}
 
 func TestClientKey(t *testing.T) {
 	for in, want := range map[string]string{
@@ -39,6 +91,21 @@ func TestClientKey(t *testing.T) {
 		if got := clientKey(in); got != want {
 			t.Errorf("clientKey(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A client counts once in any of its forms.
+func TestUniqueClientForms(t *testing.T) {
+	var evs []logparse.Event
+	for _, c := range []string{
+		"192.0.2.1", "::ffff:192.0.2.1", "2001:db8::1", "2001:DB8:0:0:0:0:0:1", "a.example", "A.Example",
+	} {
+		evs = append(evs, from(c, page("h", "/", 200, 1, base)))
+	}
+
+	key := string(uniqKey("h", base.Format("200601"), newClass(false, groupCorrect)))
+	if got := estimates(applied(evs...)); len(got) != 1 || got[key] != 3 {
+		t.Errorf("sketches = %v, want 3 clients under %q only", got, key)
 	}
 }
 

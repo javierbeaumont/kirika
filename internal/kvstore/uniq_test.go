@@ -21,14 +21,39 @@ package kvstore
 
 import (
 	"fmt"
+	"math"
 	"testing"
+	"time"
 
 	"github.com/axiomhq/hyperloglog"
+	"github.com/javierbeaumont/kirika/internal/logparse"
 )
 
 // Returns the i-th of a range of distinct IPv4 addresses.
 func ip(i int) string {
 	return fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255)
+}
+
+// Returns ev as made by client.
+func from(client string, ev logparse.Event) logparse.Event {
+	ev.ClientIP = client
+
+	return ev
+}
+
+// Returns the page requests of host from the clients first to last-1 at t.
+func visits(host string, first, last int, t time.Time) []logparse.Event {
+	evs := make([]logparse.Event, 0, last-first)
+	for i := first; i < last; i++ {
+		evs = append(evs, from(ip(i), page(host, "/", 200, 1, t)))
+	}
+
+	return evs
+}
+
+// Reports whether got is within 5% of want, three times the sketch's standard error.
+func near(got uint64, want int) bool {
+	return math.Abs(float64(got)-float64(want)) <= 0.05*float64(want)
 }
 
 // Returns the encoding of a sketch of n distinct IPs at precision p.
