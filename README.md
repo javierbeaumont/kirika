@@ -14,6 +14,7 @@ considered, the decision and its consequences.
 | [0002](docs/adr/0002-bbolt.md)                   | bbolt as the store                            |
 | [0003](docs/adr/0003-traffic-classes.md)         | Traffic classes to filter what is counted     |
 | [0004](docs/adr/0004-hyperloglog.md)             | HyperLogLog for unique visitors               |
+| [0005](docs/adr/0005-server-sent-events.md)      | Server-Sent Events for live updates           |
 
 ## License
 
