@@ -23,6 +23,7 @@ package kvstore
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 
 	"github.com/javierbeaumont/kirika/internal/logparse"
@@ -75,6 +76,32 @@ func TestUnique(t *testing.T) {
 		if _, ok := want[k]; !ok {
 			t.Errorf("sketch %q = %d, want none", k, n)
 		}
+	}
+}
+
+// A client counts in the sketch of the class of each of its pages.
+func TestUniqueClasses(t *testing.T) {
+	crawl := page("h", "/", 200, 1, base)
+	crawl.UserAgent = botUA
+	b := applied(
+		from(ip(0), page("h", "/", 200, 1, base)),
+		from(ip(0), page("h", "/missing", 404, 1, base)),
+		from(ip(1), page("h", "/missing", 404, 1, base)),
+		from(ip(2), page("h", "/moved", 301, 1, base)),
+		from(ip(3), crawl),
+	)
+
+	ym := base.Format("200601")
+	key := func(bot bool, group int) string { return string(uniqKey("h", ym, newClass(bot, group))) }
+	want := map[string]uint64{
+		key(false, groupCorrect): 1,
+		key(false, groupError):   2,
+		key(false, groupOther):   1,
+		key(true, groupCorrect):  1,
+	}
+
+	if got := estimates(b); !reflect.DeepEqual(got, want) {
+		t.Errorf("sketches = %v, want %v", got, want)
 	}
 }
 

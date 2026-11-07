@@ -23,8 +23,32 @@ package kvstore
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
+	"time"
 )
+
+// A session ID is 16 bytes, the same for the same salt, host, client and class, and another when any of them changes.
+func TestSessionID(t *testing.T) {
+	salt := bytes.Repeat([]byte{1}, saltLen)
+
+	id := sessionID(salt, "h", "c", humanVisits)
+	if len(id) != 16 || !bytes.Equal(sessionID(salt, "h", "c", humanVisits), id) {
+		t.Fatalf("sessionID = %x, want 16 bytes, the same each time", id)
+	}
+
+	for name, other := range map[string][]byte{
+		"salt":        sessionID(bytes.Repeat([]byte{2}, saltLen), "h", "c", humanVisits),
+		"host":        sessionID(salt, "g", "c", humanVisits),
+		"client":      sessionID(salt, "h", "d", humanVisits),
+		"class":       sessionID(salt, "h", "c", newClass(true, groupCorrect)),
+		"split parts": sessionID(salt, "hc", "", humanVisits),
+	} {
+		if bytes.Equal(other, id) {
+			t.Errorf("another %s gives the same ID", name)
+		}
+	}
+}
 
 func TestSessionCodec(t *testing.T) {
 	for _, s := range []session{
@@ -55,5 +79,49 @@ func TestSessionCodec(t *testing.T) {
 		if _, ok := decodeSession(b); ok {
 			t.Errorf("%s %x: decoded", name, b)
 		}
+	}
+}
+
+// Two times are apart when more than d separates them, in either order.
+func TestApart(t *testing.T) {
+	d := time.Hour
+
+	for _, tc := range []struct {
+		gap  time.Duration
+		want bool
+	}{{0, false}, {d, false}, {d + time.Nanosecond, true}} {
+		if got := apart(base, base.Add(tc.gap), d); got != tc.want {
+			t.Errorf("apart of %v later = %v, want %v", tc.gap, got, tc.want)
+		}
+
+		if got := apart(base.Add(tc.gap), base, d); got != tc.want {
+			t.Errorf("apart of %v earlier = %v, want %v", tc.gap, got, tc.want)
+		}
+	}
+}
+
+// A visit's exit counts once, under its host and class, in the month its latest page was in the batch's zone.
+func TestEndVisit(t *testing.T) {
+	d := map[string]tally{}
+	ahead := time.FixedZone("UTC+13", 13*60*60)
+	endVisit(d, session{class: humanVisits, exit: "/p", host: "h", last: base.Add(-time.Hour).Unix()}, ahead)
+
+	key := string(dimKey(tagExit, "h", base.Format("200601"), "/p"))
+	if want := map[string]tally{key: {{humanVisits, Counts{Visits: 1}}}}; !reflect.DeepEqual(d, want) {
+		t.Errorf("exits = %+v, want %+v", d, want)
+	}
+}
+
+func TestNewBatchTimeout(t *testing.T) {
+	for _, d := range []time.Duration{0, -time.Second} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("NewBatch with a visit timeout of %v did not panic", d)
+				}
+			}()
+
+			batchIn(time.UTC, Options{VisitTimeout: d})
+		}()
 	}
 }

@@ -24,6 +24,7 @@ package kvstore
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"math"
 	"reflect"
 	"strconv"
@@ -450,13 +451,55 @@ func TestClip(t *testing.T) {
 		}
 	}
 
-	ev := page("h", ascii, 200, 1, base)
+	host := strings.Repeat("h", 2*maxValueLen)
+	ev := page(host, ascii, 200, 1, base)
 	ev.Referer = ascii
 	b := applied(ev)
+	short := host[:maxValueLen]
+
+	if got := counted(b, encKey(tagDay, short), Filter{}); len(got) != 1 {
+		t.Errorf("days of the clipped host = %+v, want one", got)
+	}
 
 	for _, tag := range []string{tagURL, tagRef} {
-		if got := counted(b, encKey(tag, "h", base.Format("200601")), Filter{}); got[ascii[:maxValueLen]].Hits != 1 {
+		if got := counted(b, encKey(tag, short, base.Format("200601")), Filter{}); got[ascii[:maxValueLen]].Hits != 1 {
 			t.Errorf("values of %q = %d, want the clipped one", tag, len(got))
+		}
+	}
+}
+
+// A period is a year, a month or a day, returned without its dashes. Anything else is refused, and so is a filter with
+// an unknown value.
+func TestChecked(t *testing.T) {
+	for period, want := range map[string]string{"2000": "2000", "2000-01": "200001", "2000-01-01": "20000101"} {
+		if got, err := checked(period, Filter{}); got != want || err != nil {
+			t.Errorf("checked(%q) = %q, %v; want %q", period, got, err, want)
+		}
+	}
+
+	for _, period := range []string{
+		"", "00", "200001", "2000/01", "20-00", "abcd", "2000-1", "2000-13", "2000-01-32", " 2000",
+	} {
+		if _, err := checked(period, Filter{}); !errors.Is(err, errBadPeriod) {
+			t.Errorf("checked(%q): err = %v, want errBadPeriod", period, err)
+		}
+	}
+
+	if _, err := checked("2000", Filter{Kind: FileKind + 1}); !errors.Is(err, errBadFilter) {
+		t.Errorf("checked with an unknown kind: err = %v, want errBadFilter", err)
+	}
+}
+
+// A year has its twelve months, and a month or a day only its own.
+func TestMonths(t *testing.T) {
+	var year []string
+	for m := range 12 {
+		year = append(year, base.AddDate(0, m, 0).Format("200601"))
+	}
+
+	for date, want := range map[string][]string{"2000": year, "200001": {"200001"}, "20000101": {"200001"}} {
+		if got := months(date); !reflect.DeepEqual(got, want) {
+			t.Errorf("months(%q) = %v, want %v", date, got, want)
 		}
 	}
 }

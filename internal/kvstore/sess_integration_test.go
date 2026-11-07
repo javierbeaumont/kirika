@@ -168,6 +168,19 @@ func TestVisitAcrossFlushes(t *testing.T) {
 	}
 }
 
+// A flush with no page closes no visit: a client's pages on either side of it make one visit.
+func TestFlushWithoutPages(t *testing.T) {
+	db := openStore(t)
+	t0 := at(1, 10)
+	flush(t, db, req("h", "192.0.2.1", "/", t0))
+	flush(t, db, req("h", "192.0.2.1", "/logo.png", t0.Add(time.Minute)))
+	flush(t, db, req("h", "192.0.2.1", "/", t0.Add(2*time.Minute)))
+
+	if got := totals(t, db, "h", "2000-01", Filter{}).Visits; got != 1 {
+		t.Errorf("visits = %d, want 1", got)
+	}
+}
+
 // A visit enters on its first page and exits on its latest, files take no part, and an idle session ends and is
 // deleted.
 func TestEntryExit(t *testing.T) {
@@ -309,6 +322,18 @@ func TestOutOfOrder(t *testing.T) {
 	}
 }
 
+// Of two pages in the same second, the later in the log is the visit's exit.
+func TestSameSecondExit(t *testing.T) {
+	db := openStore(t)
+	flush(t, db, req("h", "192.0.2.1", "/a", base), req("h", "192.0.2.1", "/b", base))
+	flush(t, db, req("h", "192.0.2.2", "/", base.Add(2*time.Hour)))
+
+	want := map[string]Counts{"/b": {Visits: 1}}
+	if got := dim(t, db, "h", tagExit, "2000-01", Filter{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("exit pages = %+v, want %+v", got, want)
+	}
+}
+
 // Retrying a failed flush counts its visits once.
 func TestVisitsOnce(t *testing.T) {
 	db := openStore(t)
@@ -366,21 +391,5 @@ func TestVisitTimeout(t *testing.T) {
 
 	if got := totals(t, db, "h", "2000", Filter{}).Visits; got != 2 {
 		t.Errorf("visits = %d, want 2", got)
-	}
-}
-
-func TestNewBatchTimeout(t *testing.T) {
-	db := openStore(t)
-
-	for _, d := range []time.Duration{0, -time.Second} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("NewBatch with a visit timeout of %v did not panic", d)
-				}
-			}()
-
-			db.NewBatch(Options{VisitTimeout: d})
-		}()
 	}
 }

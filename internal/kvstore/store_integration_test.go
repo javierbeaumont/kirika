@@ -180,6 +180,49 @@ func TestOpenSchema(t *testing.T) {
 	}
 }
 
+// Every read of a closed store is an error.
+func TestClosedStore(t *testing.T) {
+	db := openStore(t)
+	closeStore(t, db)
+
+	for name, read := range map[string]func() error{
+		"Totals": func() error {
+			_, err := db.Totals("h", "2000", Filter{})
+
+			return err
+		},
+		"Series": func() error {
+			_, err := db.Series("h", tagDay, "2000", Filter{})
+
+			return err
+		},
+		"Dim": func() error {
+			_, err := db.Dim("h", tagURL, "2000", Filter{})
+
+			return err
+		},
+		"Hosts": func() error {
+			_, err := db.Hosts()
+
+			return err
+		},
+		"State": func() error {
+			_, _, err := db.State("/a.log")
+
+			return err
+		},
+		"Unique": func() error {
+			_, err := db.Unique("2000", Filter{}, "h")
+
+			return err
+		},
+	} {
+		if err := read(); !errors.Is(err, berrors.ErrDatabaseNotOpen) {
+			t.Errorf("%s: err = %v, want ErrDatabaseNotOpen", name, err)
+		}
+	}
+}
+
 // A store's salt is generated once, kept across opens and its own.
 func TestSalt(t *testing.T) {
 	salts := make([][]byte, 0, 4)
