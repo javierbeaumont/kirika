@@ -23,29 +23,41 @@ package follow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/javierbeaumont/kirika/internal/ingest"
 )
 
+// DefaultInterval is how often kirika reads a followed log unless told otherwise.
+const DefaultInterval = 2 * time.Second
+
 // Reader reads what a log gained since its last read, as an ingest.Reader does.
 type Reader interface {
 	Read(ctx context.Context) (ingest.Result, error)
 }
 
-// Run reads r with ctx now and then every interval until ctx ends, calling onChange, unless nil, after each read that
-// counted a line. It logs to log, which the caller can tag with the log's path: a failed read as an error, once until
-// the error changes or a read succeeds again, which it tells too; the counts of a read with unreadable lines as a
-// warning; and those of any other read that took lines at debug level. A read that ctx stopped is not logged.
-func Run(ctx context.Context, r Reader, interval time.Duration, log *slog.Logger, onChange func()) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
+// Run reads reader with ctx now, then every interval until ctx ends, calling onChange, unless nil, after each read that
+// counted a line. It logs to log, unless nil: a failed read as an error, once until the error changes or a read
+// succeeds again, which it tells too; the counts of a read with unreadable lines as a warning; and those of any other
+// read that took lines at debug level. A read that ctx stopped is not logged. It panics if interval is not positive.
+func Run(ctx context.Context, reader Reader, interval time.Duration, log *slog.Logger, onChange func()) {
+	if interval <= 0 {
+		panic(fmt.Sprintf("follow: interval %v is not positive", interval))
+	}
+
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
 	failed := "" // the error of the reads failing now
 
 	for ctx.Err() == nil {
-		res, err := r.Read(ctx)
+		result, err := reader.Read(ctx)
 		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 			return
 		}
@@ -62,16 +74,16 @@ func Run(ctx context.Context, r Reader, interval time.Duration, log *slog.Logger
 		}
 
 		if err == nil {
-			report(log, res)
+			report(log, result)
 
-			if res.Counted > 0 && onChange != nil {
+			if result.Counted > 0 && onChange != nil {
 				onChange()
 			}
 		}
 
 		select {
 		case <-ctx.Done():
-		case <-t.C:
+		case <-ticker.C:
 		}
 	}
 }

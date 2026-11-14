@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -202,5 +203,36 @@ func TestRunReport(t *testing.T) {
 		if got := strings.Count(logged, text); got != want {
 			t.Errorf("%d logs of %q, want %d:\n%s", got, text, want, logged)
 		}
+	}
+}
+
+// A run with a nil logger reads as any other, through reads it would log at each level.
+func TestRunNilLog(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	reader := &script{cancel: cancel, steps: []step{
+		{err: errors.New("gone")}, {res: ingest.Result{Malformed: 1}}, {res: ingest.Result{Counted: 1}},
+	}}
+	Run(ctx, reader, time.Nanosecond, nil, nil)
+
+	if reader.reads != 3 {
+		t.Errorf("%d reads, want 3", reader.reads)
+	}
+}
+
+// Run panics on an interval that is not positive, naming it.
+func TestRunInterval(t *testing.T) {
+	for _, interval := range []time.Duration{0, -time.Second} {
+		func() {
+			defer func() {
+				want := fmt.Sprintf("follow: interval %v is not positive", interval)
+				if got := recover(); got != want {
+					t.Errorf("Run with interval %v: panic %v, want %q", interval, got, want)
+				}
+			}()
+
+			Run(t.Context(), &script{}, interval, nil, nil)
+		}()
 	}
 }
