@@ -50,19 +50,25 @@ func TestRunLog(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	o := ingest.DefaultOptions()
-	o.DefaultHost = "h"
+	options := ingest.DefaultOptions()
+	options.DefaultHost = "h"
 
-	r, err := ingest.New(db, path, logparse.ParseNCSA, o)
+	logReader, err := ingest.New(db, path, logparse.ParseNCSA, options)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+
+	t.Cleanup(func() {
+		if err := logReader.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	changed, done := make(chan struct{}, 8), make(chan struct{})
 
 	go func() {
-		Run(ctx, r, time.Millisecond, slog.New(slog.DiscardHandler), func() { changed <- struct{}{} })
+		Run(ctx, logReader, time.Millisecond, slog.New(slog.DiscardHandler), func() { changed <- struct{}{} })
 		close(done)
 	}()
 

@@ -85,10 +85,11 @@ func (res Result) Unreadable() int {
 	return res.Malformed + res.Binary + res.TooLong + res.BadDate
 }
 
-// Reader reads one log into a store, a read at a time.
+// Reader reads one log into a store, a read at a time. It keeps the log open between reads, until Close.
 type Reader struct {
 	count   kvstore.Options
 	db      *kvstore.DB
+	file    *os.File // the log kept open, nil when none
 	host    string
 	log     *slog.Logger
 	methods map[string]bool
@@ -158,95 +159,175 @@ func (o Options) check(parse logparse.Parser) error {
 
 // Read counts the lines written to the log since the last read and stores where it stopped, all in one transaction. It
 // goes on after the last line read when that line is still at its offset, and else reads the log from its start: the
-// path holds a new one. A last line with no newline yet waits for the next read. A read with no new line writes
-// nothing. The first read of a path, which has no state yet, writes nothing unless it finds a readable line, counted or
-// dropped, and fails with ErrUnreadable if it finds an unreadable one instead. Any other read skips unreadable lines.
-// Once ctx ends, a read fails with ctx's error before its next line. A failed read writes nothing, though its Result
-// counts the lines it read before the error.
+// path holds a new one. When the path names another file than the one the reader keeps open, as after a rotation by
+// rename, it first reads what the old file gained, then the new one from its start. When the path names no file and the
+// one kept open has no name left, it reads what that one gained and releases it. A last line with no newline yet waits
+// for the next read. A read with no new line writes nothing. The first read of a path, which has no state yet, writes
+// nothing unless it finds a readable line, counted or dropped, and fails with ErrUnreadable if it finds an unreadable
+// one instead. Any other read skips unreadable lines. Once ctx ends, a read fails with ctx's error before its next
+// line. A failed read writes nothing and keeps the old file, though its Result counts the lines it read before the
+// error.
 func (r *Reader) Read(ctx context.Context) (Result, error) {
-	var res Result
+	var progress scan
 
-	s, ok, err := r.db.State(r.path)
+	state, hasState, err := r.db.State(r.path)
 	if err != nil {
-		return res, err
+		return progress.result, err
 	}
 
-	f, err := os.Open(r.path)
-	if err != nil {
-		return res, err
-	}
-	defer func() { _ = f.Close() }() // read only: a failed close loses nothing
+	file, err := r.open()
 
-	br, off, num, err := resume(f, s, ok)
-	if err != nil {
-		return res, err
+	gone := errors.Is(err, os.ErrNotExist) && r.file != nil && deleted(r.file)
+	if gone {
+		file, err = r.file, nil
 	}
 
-	b := r.db.NewBatch(r.count)
+	if err != nil {
+		return progress.result, err
+	}
+
+	err = r.readAll(ctx, file, state, hasState, &progress)
+
+	switch {
+	case err != nil:
+	case !hasState && !progress.readable:
+		err = progress.refused
+	case progress.read:
+		progress.batch.SetState(r.path, progress.last)
+		err = r.db.Flush(progress.batch)
+	}
+
+	if err != nil {
+		if file != r.file {
+			_ = file.Close() // read only: a failed close loses nothing
+		}
+
+		return progress.result, err
+	}
+
+	if file != r.file || gone {
+		_ = r.Close() // read only: a failed close loses nothing
+	}
+
+	if !gone {
+		r.file = file
+	}
+
+	return progress.result, nil
+}
+
+// Close releases the log the reader keeps open. A later read opens it again.
+func (r *Reader) Close() error {
+	if r.file == nil {
+		return nil
+	}
+
+	err := r.file.Close()
+	r.file = nil
+
+	return err
+}
+
+// Returns the file the path names: r.file while the path still names it, else a new one opened.
+func (r *Reader) open() (*os.File, error) {
+	if r.file != nil {
+		named, err := os.Stat(r.path)
+		if err != nil {
+			return nil, err
+		}
+
+		last, err := r.file.Stat()
+		if err != nil {
+			return nil, err
+		}
+
+		if os.SameFile(named, last) {
+			return r.file, nil
+		}
+	}
+
+	return os.Open(r.path)
+}
+
+// What a read found, across the files it read.
+type scan struct {
+	batch    *kvstore.Batch
+	last     kvstore.LogState // the last line read
+	read     bool             // a line at least
+	readable bool             // a line counted or dropped
+	refused  error            // ErrUnreadable, naming the first unreadable line
+	result   Result
+}
+
+// Reads file into progress as readFile does. When r.file is another file, it reads r.file first, then file from its
+// start.
+func (r *Reader) readAll(ctx context.Context, file *os.File, state kvstore.LogState, hasState bool,
+	progress *scan,
+) error {
+	progress.batch = r.db.NewBatch(r.count)
 	limit := r.now().Add(ahead)
 
-	var (
-		last     line
-		read     bool  // a line at least
-		readable bool  // a line counted or dropped
-		refused  error // ErrUnreadable, naming the first unreadable line
-	)
+	if r.file != nil && file != r.file {
+		if err := r.readFile(ctx, r.file, state, hasState, limit, progress); err != nil {
+			return err
+		}
+
+		hasState = false
+	}
+
+	return r.readFile(ctx, file, state, hasState, limit, progress)
+}
+
+// Reads file into progress, after state's line when hasState and that line is still there, else from its start. Lines
+// dated after limit are unreadable.
+func (r *Reader) readFile(ctx context.Context, file *os.File, state kvstore.LogState, hasState bool, limit time.Time,
+	progress *scan,
+) error {
+	fileReader, offset, lineNum, err := resume(file, state, hasState)
+	if err != nil {
+		return err
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return res, err
+			return err
 		}
 
-		l, n, more, err := next(br, off)
+		logLine, size, more, err := next(fileReader, offset)
 		if err != nil {
-			return res, err
+			return err
 		}
 
 		if !more {
-			break
+			return nil
 		}
 
-		off += n
-		num++
-		last, read = l, true
+		offset += size
+		lineNum++
+		progress.last, progress.read = kvstore.LogState{Line: lineNum, Offset: logLine.start, Sum: logLine.sum}, true
 
-		ev, judged, why := judge(l, r.parse, r.methods, r.host, limit)
-		res.add(judged)
+		event, judged, why := judge(logLine, r.parse, r.methods, r.host, limit)
+		progress.result.add(judged)
 
 		switch {
 		case judged == counted:
-			b.Apply(ev)
+			progress.batch.Apply(event)
 
-			readable = true
+			progress.readable = true
 		case judged == dropped:
-			r.tell("line dropped", l, num, judged, "method", ev.Method)
+			r.tell("line dropped", logLine, lineNum, judged, "method", event.Method)
 
-			readable = true
+			progress.readable = true
 		case judged.unreadable():
-			r.tell("line unreadable", l, num, judged, "error", why)
+			r.tell("line unreadable", logLine, lineNum, judged, "error", why)
 
-			if refused == nil {
-				refused = unreadable(num, judged, why)
+			if progress.refused == nil {
+				progress.refused = unreadable(lineNum, judged, why)
 			}
 		default:
-			r.tell("line skipped", l, num, judged)
+			r.tell("line skipped", logLine, lineNum, judged)
 		}
 	}
-
-	switch {
-	case !ok && !readable:
-		return res, refused
-	case !read:
-		return res, nil
-	}
-
-	b.SetState(r.path, kvstore.LogState{Line: num, Offset: last.start, Sum: last.sum})
-
-	if err := r.db.Flush(b); err != nil {
-		return res, err
-	}
-
-	return res, nil
 }
 
 // Wraps ErrUnreadable with line number num, its fate f and the parser's error why, if any.

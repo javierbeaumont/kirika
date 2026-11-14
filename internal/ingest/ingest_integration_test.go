@@ -99,20 +99,33 @@ func appendLog(t *testing.T, path, text string) {
 	}
 }
 
-// Returns a reader of the NCSA log at path into db, with the default options, the default host h and the clock at base.
-func reader(t *testing.T, db *kvstore.DB, path string) *Reader {
+// Returns a reader of the NCSA log at path into db, with options, closed when the test ends.
+func newReader(t *testing.T, db *kvstore.DB, path string, options Options) *Reader {
 	t.Helper()
 
-	o := DefaultOptions()
-	o.DefaultHost = "h"
-	o.Now = func() time.Time { return base }
-
-	r, err := New(db, path, logparse.ParseNCSA, o)
+	logReader, err := New(db, path, logparse.ParseNCSA, options)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	return r
+	t.Cleanup(func() {
+		if err := logReader.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	return logReader
+}
+
+// Returns a reader of the NCSA log at path into db, with the default options, the default host h and the clock at base.
+func reader(t *testing.T, db *kvstore.DB, path string) *Reader {
+	t.Helper()
+
+	options := DefaultOptions()
+	options.DefaultHost = "h"
+	options.Now = func() time.Time { return base }
+
+	return newReader(t, db, path, options)
 }
 
 // Reads r, failing the test on error.
@@ -271,27 +284,24 @@ func TestReasons(t *testing.T) {
 
 	var logged bytes.Buffer
 
-	o := DefaultOptions()
-	o.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	o.Now = func() time.Time { return base }
+	options := DefaultOptions()
+	options.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	options.Now = func() time.Time { return base }
 
-	r, err := New(db, path, logparse.ParseNCSA, o)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	logReader := newReader(t, db, path, options)
 
 	want := Result{Counted: 2, Blank: 1, Dropped: 1, Malformed: 1, Binary: 1, TooLong: 1, BadDate: 2}
-	if got := read(t, r); got != want {
+	if got := read(t, logReader); got != want {
 		t.Errorf("Read = %+v, want %+v", got, want)
 	}
 
-	off := 0
-	for i, l := range lines {
-		if i != 0 && i != 6 && !strings.Contains(logged.String(), fmt.Sprintf("line=%d offset=%d ", i+1, off)) {
-			t.Errorf("no report of line %d at offset %d", i+1, off)
+	offset := 0
+	for i, text := range lines {
+		if i != 0 && i != 6 && !strings.Contains(logged.String(), fmt.Sprintf("line=%d offset=%d ", i+1, offset)) {
+			t.Errorf("no report of line %d at offset %d", i+1, offset)
 		}
 
-		off += len(l) + 1
+		offset += len(text) + 1
 	}
 
 	for _, reason := range []string{
@@ -317,19 +327,16 @@ func TestLineNumbers(t *testing.T) {
 
 	var logged bytes.Buffer
 
-	o := DefaultOptions()
-	o.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	o.Now = func() time.Time { return base }
+	options := DefaultOptions()
+	options.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	options.Now = func() time.Time { return base }
 
-	r, err := New(db, path, logparse.ParseNCSA, o)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	logReader := newReader(t, db, path, options)
 
 	for _, tc := range []struct {
-		name, log string
-		grow      bool
-		bad, last int64
+		name, log         string
+		grow              bool
+		badLine, lastLine int64
 	}{
 		{"the first read", "", true, 0, 2},
 		{"the next read", "garbage\n", true, 3, 3},
@@ -343,14 +350,14 @@ func TestLineNumbers(t *testing.T) {
 			writeLog(t, path, tc.log)
 		}
 
-		read(t, r)
+		read(t, logReader)
 
-		if tc.bad != 0 && !strings.Contains(logged.String(), fmt.Sprintf("line=%d ", tc.bad)) {
-			t.Errorf("%s: no report of line %d in %q", tc.name, tc.bad, logged.String())
+		if tc.badLine != 0 && !strings.Contains(logged.String(), fmt.Sprintf("line=%d ", tc.badLine)) {
+			t.Errorf("%s: no report of line %d in %q", tc.name, tc.badLine, logged.String())
 		}
 
-		if s, _, err := db.State(r.path); err != nil || s.Line != tc.last {
-			t.Errorf("%s: state at line %d, %v; want %d", tc.name, s.Line, err, tc.last)
+		if state, _, err := db.State(logReader.path); err != nil || state.Line != tc.lastLine {
+			t.Errorf("%s: state at line %d, %v; want %d", tc.name, state.Line, err, tc.lastLine)
 		}
 	}
 }
@@ -493,6 +500,159 @@ func TestReadStopped(t *testing.T) {
 	}
 }
 
+// A read after a rotation by rename takes what the old file gained, then the new log from its start, and goes on in the
+// new one; what the old file gains after that is lost.
+func TestRotateRename(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, gets(0, 2))
+	logReader := reader(t, db, path)
+	read(t, logReader)
+	appendLog(t, path, gets(2, 1))
+	rename(t, path, path+".1")
+	writeLog(t, path, gets(3, 2))
+
+	if got := read(t, logReader); got != (Result{Counted: 3}) || hits(t, db) != 5 {
+		t.Errorf("Read after the rotation = %+v, %d hits; want 3 counted, 5 hits", got, hits(t, db))
+	}
+
+	appendLog(t, path+".1", gets(5, 1))
+	appendLog(t, path, gets(6, 1))
+
+	if got := read(t, logReader); got != (Result{Counted: 1}) || hits(t, db) != 6 {
+		t.Errorf("next Read = %+v, %d hits; want 1 counted, 6 hits", got, hits(t, db))
+	}
+}
+
+// While the path names no file, a read fails and keeps the old one; so does a read stopped in the new log. The next
+// read takes what the old file gained, then the new log.
+func TestRotateFailed(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, gets(0, 1))
+	logReader := reader(t, db, path)
+	read(t, logReader)
+	appendLog(t, path, gets(1, 1))
+	rename(t, path, path+".1")
+
+	if _, err := logReader.Read(t.Context()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Read with no log at the path: %v, want os.ErrNotExist", err)
+	}
+
+	writeLog(t, path, gets(2, 1))
+
+	// The checks before the old file's line, its end and the new log's line.
+	result, err := logReader.Read(&countdown{Context: t.Context(), n: 3})
+	if result != (Result{Counted: 2}) || !errors.Is(err, context.Canceled) {
+		t.Errorf("Read stopped in the new log = %+v, %v; want 2 counted, context.Canceled", result, err)
+	}
+
+	if got := read(t, logReader); got != (Result{Counted: 2}) || hits(t, db) != 3 {
+		t.Errorf("next Read = %+v, %d hits; want 2 counted, 3 hits", got, hits(t, db))
+	}
+}
+
+// While the path names no file, a read takes what a deleted log gained and releases it. The next read fails; once a new
+// log is there, a read takes it from its start.
+func TestDeleted(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, gets(0, 1))
+	logReader := reader(t, db, path)
+	read(t, logReader)
+	appendLog(t, path, gets(1, 1))
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	if count := opened(t, path+" (deleted)"); count != 1 {
+		t.Errorf("the deleted log is open %d times before the read, want 1", count)
+	}
+
+	if got := read(t, logReader); got != (Result{Counted: 1}) || hits(t, db) != 2 {
+		t.Errorf("Read of the deleted log = %+v, %d hits; want 1 counted, 2 hits", got, hits(t, db))
+	}
+
+	if count := opened(t, path+" (deleted)"); count != 0 {
+		t.Errorf("the deleted log is open %d times after the read, want 0", count)
+	}
+
+	if _, err := logReader.Read(t.Context()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("next Read: %v, want os.ErrNotExist", err)
+	}
+
+	writeLog(t, path, gets(2, 1))
+
+	if got := read(t, logReader); got != (Result{Counted: 1}) || hits(t, db) != 3 {
+		t.Errorf("Read of a new log = %+v, %d hits; want 1 counted, 3 hits", got, hits(t, db))
+	}
+}
+
+// A reader keeps its log open between reads, and Close releases it. Close before a read and a second Close do nothing,
+// and a read after Close opens the log again.
+func TestClose(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, gets(0, 1))
+	logReader := reader(t, db, path)
+
+	if err := logReader.Close(); err != nil {
+		t.Errorf("Close before a read: %v", err)
+	}
+
+	read(t, logReader)
+
+	if count := opened(t, path); count != 1 {
+		t.Errorf("the log is open %d times after a read, want 1", count)
+	}
+
+	for i := range 2 {
+		if err := logReader.Close(); err != nil {
+			t.Errorf("Close %d: %v", i+1, err)
+		}
+	}
+
+	if count := opened(t, path); count != 0 {
+		t.Errorf("the log is open %d times after Close, want 0", count)
+	}
+
+	appendLog(t, path, gets(1, 1))
+
+	if got := read(t, logReader); got != (Result{Counted: 1}) {
+		t.Errorf("Read after Close = %+v, want 1 counted", got)
+	}
+}
+
+// Renames the file at from to to.
+func rename(t *testing.T, from, to string) {
+	t.Helper()
+
+	if err := os.Rename(from, to); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+}
+
+// Returns how many of the process's open files are the one at path, as Linux lists them.
+func opened(t *testing.T, path string) int {
+	t.Helper()
+
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatalf("list open files: %v", err)
+	}
+
+	count := 0
+
+	for _, entry := range entries {
+		if target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name())); err == nil && target == path {
+			count++
+		}
+	}
+
+	return count
+}
+
 // Writes v under key into the bucket bkt of the store at store, which must be closed.
 func putRaw(t *testing.T, store, bkt, key string, v []byte) {
 	t.Helper()
@@ -621,24 +781,22 @@ func TestCountOptions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "access.log")
 	writeLog(t, path, gets(0, 1))
 
-	o := DefaultOptions()
-	o.Count.ValidCodes = []int{404}
-	o.DefaultHost = "h"
-	o.Now = func() time.Time { return base }
+	options := DefaultOptions()
+	options.Count.ValidCodes = []int{404}
+	options.DefaultHost = "h"
+	options.Now = func() time.Time { return base }
 
-	r, err := New(db, path, logparse.ParseNCSA, o)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	logReader := newReader(t, db, path, options)
 
-	read(t, r)
+	read(t, logReader)
 
 	if got := hits(t, db); got != 0 {
 		t.Errorf("hits of correct requests = %d, want 0", got)
 	}
 
-	if c, err := db.Totals("h", "2000", kvstore.Filter{Status: kvstore.AllStatuses}); err != nil || c.Hits != 1 {
-		t.Errorf("hits of every status = %d, %v; want 1", c.Hits, err)
+	totals, err := db.Totals("h", "2000", kvstore.Filter{Status: kvstore.AllStatuses})
+	if err != nil || totals.Hits != 1 {
+		t.Errorf("hits of every status = %d, %v; want 1", totals.Hits, err)
 	}
 }
 
@@ -649,12 +807,9 @@ func TestClock(t *testing.T) {
 	now := time.Now()
 	writeLog(t, path, ncsa("10.0.0.1", "GET", "/", now)+"\n"+ncsa("10.0.0.2", "GET", "/", now.Add(2*ahead))+"\n")
 
-	r, err := New(db, path, logparse.ParseNCSA, DefaultOptions())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	logReader := newReader(t, db, path, DefaultOptions())
 
-	if got := read(t, r); got != (Result{Counted: 1, BadDate: 1}) {
+	if got := read(t, logReader); got != (Result{Counted: 1, BadDate: 1}) {
 		t.Errorf("Read = %+v, want 1 counted and 1 dated ahead", got)
 	}
 }
