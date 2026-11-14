@@ -354,59 +354,97 @@ func TestLineNumbers(t *testing.T) {
 	}
 }
 
-// 50 unreadable lines in a row, across reads, stop a read before it writes anything, and the next read stops again on
-// them. Blank lines neither add to the row nor break it; a counted or dropped line breaks it.
-func TestUnreadableRun(t *testing.T) {
-	bad := func(n int) string { return strings.Repeat("garbage\n", n) }
+// The first read of a path fails and writes nothing when it finds an unreadable line and none counted or dropped, and
+// its error names the first unreadable line and why. Blank lines are neither.
+func TestFirstRead(t *testing.T) {
+	const refused = "ingest: no readable line in the first read of a log; "
 
 	for _, tc := range []struct {
-		name  string
-		reads []string
-		fails bool
+		name, log, err string
+		state          bool
 	}{
-		{"49", []string{bad(49) + gets(0, 1)}, false},
-		{"50", []string{bad(50) + gets(0, 1)}, true},
-		{"50 after a counted line", []string{gets(0, 1) + bad(50)}, true},
-		{"blank lines inside", []string{bad(25) + "\n\n" + bad(25)}, true},
-		{"a counted line inside", []string{bad(25) + gets(0, 1) + bad(25)}, false},
-		{"a dropped line inside", []string{bad(25) + ncsa("10.0.0.1", "TRACE", "/", base) + "\n" + bad(25)}, false},
-		{"across reads", []string{bad(30), bad(20)}, true},
-		{"across reads, broken", []string{bad(30), gets(0, 1) + bad(20)}, false},
+		{"empty", "", "", false},
+		{"blank", "\n\n", "", false},
+		{"malformed", "\ngarbage\n\x00\n", refused + "line 2 is malformed: ncsa: ident is missing at offset 7", false},
+		{"binary", "\x00\n", refused + "line 1 is binary", false},
+		{"too long", strings.Repeat("x", maxLine+1) + "\n", refused + "line 1 is longer than 1 MiB", false},
+		{
+			"dated ahead", ncsa("192.0.2.1", "GET", "/", base.Add(2*ahead)) + "\n",
+			refused + "line 1 is dated more than 24 hours ahead or before the year 1000", false,
+		},
+		{"malformed and a counted one", "garbage\n" + gets(0, 1), "", true},
+		{"malformed and a dropped one", "garbage\n" + ncsa("192.0.2.1", "TRACE", "/", base) + "\n", "", true},
 	} {
 		db := openStore(t)
 		path := filepath.Join(t.TempDir(), "access.log")
-		writeLog(t, path, "")
-		r := reader(t, db, path)
+		writeLog(t, path, tc.log)
 
-		for _, text := range tc.reads[:len(tc.reads)-1] {
-			appendLog(t, path, text)
-			read(t, r)
+		_, err := reader(t, db, path).Read()
+		if got := fmt.Sprint(err); tc.err == "" && err != nil || tc.err != "" && (got != tc.err ||
+			!errors.Is(err, ErrUnreadable)) {
+			t.Errorf("%s: %v, want %q", tc.name, err, tc.err)
 		}
 
-		before, _, _ := db.State(r.path)
-		hitsBefore := hits(t, db)
-		appendLog(t, path, tc.reads[len(tc.reads)-1])
-
-		_, err := r.Read()
-		if !tc.fails {
-			if err != nil {
-				t.Errorf("%s: %v", tc.name, err)
-			}
-
-			continue
+		if _, ok, err := db.State(path); err != nil || ok != tc.state {
+			t.Errorf("%s: a state %v, %v; want %v", tc.name, ok, err, tc.state)
 		}
+	}
+}
 
-		if !errors.Is(err, ErrUnreadable) {
-			t.Errorf("%s: %v, want ErrUnreadable", tc.name, err)
-		}
+// A first read that writes nothing leaves the path without a state, and the next one reads the log from its start:
+// after blank lines, an unreadable one fails it, and a readable one then counts.
+func TestFirstReadAgain(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, "\n")
+	r := reader(t, db, path)
 
-		if _, err := r.Read(); !errors.Is(err, ErrUnreadable) {
-			t.Errorf("%s: the next read: %v, want ErrUnreadable", tc.name, err)
-		}
+	if got := read(t, r); got != (Result{Blank: 1}) {
+		t.Errorf("Read of a blank line = %+v, want 1 blank", got)
+	}
 
-		if after, _, _ := db.State(r.path); after != before || hits(t, db) != hitsBefore {
-			t.Errorf("%s: the stopped reads wrote: state %+v, then %+v", tc.name, before, after)
+	appendLog(t, path, "garbage\n")
+
+	if got, err := r.Read(); got != (Result{Blank: 1, Malformed: 1}) || !errors.Is(err, ErrUnreadable) {
+		t.Errorf("Read of an unreadable line = %+v, %v; want 1 blank, 1 malformed and ErrUnreadable", got, err)
+	}
+
+	appendLog(t, path, gets(0, 1))
+
+	if got := read(t, r); got != (Result{Counted: 1, Blank: 1, Malformed: 1}) || hits(t, db) != 1 {
+		t.Errorf("Read of a readable line = %+v, %d hits; want 1 counted, 1 blank, 1 malformed, 1 hit", got,
+			hits(t, db))
+	}
+}
+
+// Once the path has a state, a read skips unreadable lines with none readable and goes on after them, and so does the
+// read of a new log in its place.
+func TestSkipUnreadable(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, gets(0, 1))
+	r := reader(t, db, path)
+	read(t, r)
+
+	for _, tc := range []struct {
+		name string
+		log  func()
+		want Result
+	}{
+		{"lines appended", func() { appendLog(t, path, strings.Repeat("garbage\n", 100)) }, Result{Malformed: 100}},
+		{"no new line", func() {}, Result{}},
+		{"a new log", func() { writeLog(t, path, "junk\n") }, Result{Malformed: 1}},
+		{"no new line in it", func() {}, Result{}},
+	} {
+		tc.log()
+
+		if got := read(t, r); got != tc.want {
+			t.Errorf("%s: Read = %+v, want %+v", tc.name, got, tc.want)
 		}
+	}
+
+	if got := hits(t, db); got != 1 {
+		t.Errorf("hits = %d, want 1", got)
 	}
 }
 

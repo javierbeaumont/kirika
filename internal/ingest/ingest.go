@@ -40,11 +40,9 @@ import (
 // How far ahead of a read a line may be dated, for a clock that runs a little fast.
 const ahead = 24 * time.Hour
 
-// The unreadable lines in a row that stop a read: a wrong log format makes every line one.
-const maxRun = 50
-
-// ErrUnreadable is the error of a read stopped by maxRun unreadable lines in a row.
-var ErrUnreadable = errors.New("ingest: too many unreadable lines in a row")
+// ErrUnreadable is the error of the first read of a path when it finds unreadable lines and no readable one, as with a
+// wrong log format.
+var ErrUnreadable = errors.New("ingest: no readable line in the first read of a log")
 
 // Options are the rules of a read.
 type Options struct {
@@ -96,7 +94,6 @@ type Reader struct {
 	now     func() time.Time
 	parse   logparse.Parser
 	path    string // absolute, the key of the log's state
-	run     int    // unreadable lines in a row at the end of the last read that wrote
 }
 
 // New returns a reader of the log at path that parses its lines with parse and counts them into db by the rules of o.
@@ -161,8 +158,9 @@ func (o Options) check(parse logparse.Parser) error {
 // Read counts the lines written to the log since the last read and stores where it stopped, all in one transaction. It
 // goes on after the last line read when that line is still at its offset, and else reads the log from its start: the
 // path holds a new one. A last line with no newline yet waits for the next read. A read with no new line writes
-// nothing. maxRun unreadable lines in a row, counted across reads, stop it with ErrUnreadable. A failed read writes
-// nothing, though its Result counts the lines it read before the error.
+// nothing. The first read of a path, which has no state yet, writes nothing unless it finds a readable line, counted or
+// dropped, and fails with ErrUnreadable if it finds an unreadable one instead. Any other read skips unreadable lines. A
+// failed read writes nothing, though its Result counts the lines it read before the error.
 func (r *Reader) Read() (Result, error) {
 	var res Result
 
@@ -184,11 +182,12 @@ func (r *Reader) Read() (Result, error) {
 
 	b := r.db.NewBatch(r.count)
 	limit := r.now().Add(ahead)
-	run := r.run
 
 	var (
-		last line
-		read bool // a line at least
+		last     line
+		read     bool  // a line at least
+		readable bool  // a line counted or dropped
+		refused  error // ErrUnreadable, naming the first unreadable line
 	)
 
 	for {
@@ -212,25 +211,26 @@ func (r *Reader) Read() (Result, error) {
 		case judged == counted:
 			b.Apply(ev)
 
-			run = 0
+			readable = true
 		case judged == dropped:
 			r.tell("line dropped", l, num, judged, "method", ev.Method)
 
-			run = 0
+			readable = true
 		case judged.unreadable():
 			r.tell("line unreadable", l, num, judged, "error", why)
 
-			run++
+			if refused == nil {
+				refused = unreadable(num, judged, why)
+			}
 		default:
 			r.tell("line skipped", l, num, judged)
 		}
-
-		if run >= maxRun {
-			return res, fmt.Errorf("%w: %d, the last line %d; is the log format right?", ErrUnreadable, run, num)
-		}
 	}
 
-	if !read {
+	switch {
+	case !ok && !readable:
+		return res, refused
+	case !read:
 		return res, nil
 	}
 
@@ -240,9 +240,16 @@ func (r *Reader) Read() (Result, error) {
 		return res, err
 	}
 
-	r.run = run
-
 	return res, nil
+}
+
+// Wraps ErrUnreadable with line number num, its fate f and the parser's error why, if any.
+func unreadable(num int64, f fate, why error) error {
+	if why != nil {
+		return fmt.Errorf("%w; line %d is %v: %w", ErrUnreadable, num, f, why)
+	}
+
+	return fmt.Errorf("%w; line %d is %v", ErrUnreadable, num, f)
 }
 
 // Tells at debug level what became of line number num, which was not counted, never its content: it holds a client

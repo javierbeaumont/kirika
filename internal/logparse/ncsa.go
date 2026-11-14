@@ -41,7 +41,7 @@ func ParseNCSA(line []byte) (Event, error) {
 	sc := &clfScanner{s: string(line)}
 	host := sc.plain("client")
 	sc.plain("ident")
-	sc.plain("authuser")
+	sc.untilBracket("authuser")
 	ts := sc.bracket("time")
 
 	req, ok := sc.quote("request")
@@ -175,6 +175,28 @@ func (sc *clfScanner) plain(field string) string {
 	start := sc.i
 	for sc.i < len(sc.s) && sc.s[sc.i] != ' ' {
 		sc.i++
+	}
+
+	if sc.i == start {
+		sc.fail(field, "is missing")
+	}
+
+	return sc.s[start:sc.i]
+}
+
+// Reads a field that may hold spaces: it runs to the next " [", else to the end of the line.
+func (sc *clfScanner) untilBracket(field string) string {
+	if sc.err != nil {
+		return ""
+	}
+
+	sc.skipSpaces()
+
+	start := sc.i
+	if n := strings.Index(sc.s[start:], " ["); n >= 0 {
+		sc.i += n
+	} else {
+		sc.i = len(sc.s)
 	}
 
 	if sc.i == start {

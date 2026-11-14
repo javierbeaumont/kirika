@@ -108,7 +108,7 @@ func TestParseNCSAErrors(t *testing.T) {
 		{"", "ncsa: client is missing at offset 0"},
 		{"192.0.2.1", "ncsa: ident is missing at offset 9"},
 		{"192.0.2.1 -", "ncsa: authuser is missing at offset 11"},
-		{"not a log line", "ncsa: time does not start with [ at offset 10"},
+		{"not a log line", "ncsa: time does not start with [ at offset 14"},
 		{`192.0.2.1 - - [01/Jan/2000:00:00:00 +0000 "GET / HTTP/1.1"`, "ncsa: time has no closing ] at offset 58"},
 		{`192.0.2.1 - - [not a time] "GET / HTTP/1.1" 200 1`, "ncsa: time is invalid"},
 		{`192.0.2.1 - - [01/Jan/0001:00:00:00 +0100] "GET / HTTP/1.1" 200 1`, "ncsa: time is outside years 1-9999"},
@@ -196,6 +196,23 @@ func TestParseNCSAFixture(t *testing.T) {
 	// Line 2: 404, referer "-" normalised to "".
 	if got := events[2]; got.Path != "/missing" || got.Referer != "" || got.Status != 404 {
 		t.Errorf("line 2 mismatch: %+v", got)
+	}
+}
+
+// A user name runs to the " [" before the time, so one with a space shifts no field.
+func TestParseNCSAUserName(t *testing.T) {
+	for _, user := range []string{"-", "alice", "alice smith", "a  b/c"} {
+		line := `192.0.2.1 - ` + user + ` [01/Jan/2000:00:00:00 +0000] "GET /a HTTP/1.1" 200 1`
+
+		got, err := ParseNCSA([]byte(line))
+		if err != nil {
+			t.Fatalf("user %q: parse: %v", user, err)
+		}
+
+		if got.ClientIP != "192.0.2.1" || got.Path != "/a" || got.Status != 200 || got.Size != 1 {
+			t.Errorf("user %q: client, path, status, size = %q, %q, %d, %d; want 192.0.2.1, /a, 200, 1", user,
+				got.ClientIP, got.Path, got.Status, got.Size)
+		}
 	}
 }
 
