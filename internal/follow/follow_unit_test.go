@@ -46,7 +46,7 @@ type script struct {
 	reads  int
 }
 
-func (s *script) Read() (ingest.Result, error) {
+func (s *script) Read(context.Context) (ingest.Result, error) {
 	st := s.steps[s.reads]
 
 	s.reads++
@@ -122,6 +122,43 @@ func TestRunEnded(t *testing.T) {
 
 	Run(ctx, &script{cancel: cancel, steps: []step{{res: ingest.Result{Counted: 1}}}}, time.Nanosecond,
 		slog.New(slog.DiscardHandler), nil)
+}
+
+// A reader whose read lasts until its context ends.
+type stuck struct{ started chan struct{} }
+
+func (s stuck) Read(ctx context.Context) (ingest.Result, error) {
+	close(s.started)
+	<-ctx.Done()
+
+	return ingest.Result{Counted: 1}, ctx.Err()
+}
+
+// The end of the context stops a read under way, and the run returns at once without a log or a call to onChange.
+func TestRunStopped(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	s, done := stuck{started: make(chan struct{})}, make(chan struct{})
+
+	var buf bytes.Buffer
+
+	go func() {
+		Run(ctx, s, time.Hour, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+			func() { t.Error("onChange called after a stopped read") })
+		close(done)
+	}()
+
+	<-s.started
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run still running a second after its context ended")
+	}
+
+	if buf.Len() > 0 {
+		t.Errorf("Run logged a stopped read:\n%s", buf.String())
+	}
 }
 
 // A failed read is logged once until its error changes or a read succeeds again, which is told.

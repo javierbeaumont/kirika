@@ -24,6 +24,7 @@ package ingest
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -159,9 +160,10 @@ func (o Options) check(parse logparse.Parser) error {
 // goes on after the last line read when that line is still at its offset, and else reads the log from its start: the
 // path holds a new one. A last line with no newline yet waits for the next read. A read with no new line writes
 // nothing. The first read of a path, which has no state yet, writes nothing unless it finds a readable line, counted or
-// dropped, and fails with ErrUnreadable if it finds an unreadable one instead. Any other read skips unreadable lines. A
-// failed read writes nothing, though its Result counts the lines it read before the error.
-func (r *Reader) Read() (Result, error) {
+// dropped, and fails with ErrUnreadable if it finds an unreadable one instead. Any other read skips unreadable lines.
+// Once ctx ends, a read fails with ctx's error before its next line. A failed read writes nothing, though its Result
+// counts the lines it read before the error.
+func (r *Reader) Read(ctx context.Context) (Result, error) {
 	var res Result
 
 	s, ok, err := r.db.State(r.path)
@@ -191,6 +193,10 @@ func (r *Reader) Read() (Result, error) {
 	)
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+
 		l, n, more, err := next(br, off)
 		if err != nil {
 			return res, err

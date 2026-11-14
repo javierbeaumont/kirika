@@ -23,6 +23,7 @@ package ingest
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -118,7 +119,7 @@ func reader(t *testing.T, db *kvstore.DB, path string) *Reader {
 func read(t *testing.T, r *Reader) Result {
 	t.Helper()
 
-	res, err := r.Read()
+	res, err := r.Read(t.Context())
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -172,7 +173,7 @@ func TestNewLog(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "access.log")
 	r := reader(t, db, path)
 
-	if _, err := r.Read(); !errors.Is(err, os.ErrNotExist) {
+	if _, err := r.Read(t.Context()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Read of a missing log: %v, want os.ErrNotExist", err)
 	}
 
@@ -379,7 +380,7 @@ func TestFirstRead(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "access.log")
 		writeLog(t, path, tc.log)
 
-		_, err := reader(t, db, path).Read()
+		_, err := reader(t, db, path).Read(t.Context())
 		if got := fmt.Sprint(err); tc.err == "" && err != nil || tc.err != "" && (got != tc.err ||
 			!errors.Is(err, ErrUnreadable)) {
 			t.Errorf("%s: %v, want %q", tc.name, err, tc.err)
@@ -405,7 +406,7 @@ func TestFirstReadAgain(t *testing.T) {
 
 	appendLog(t, path, "garbage\n")
 
-	if got, err := r.Read(); got != (Result{Blank: 1, Malformed: 1}) || !errors.Is(err, ErrUnreadable) {
+	if got, err := r.Read(t.Context()); got != (Result{Blank: 1, Malformed: 1}) || !errors.Is(err, ErrUnreadable) {
 		t.Errorf("Read of an unreadable line = %+v, %v; want 1 blank, 1 malformed and ErrUnreadable", got, err)
 	}
 
@@ -445,6 +446,50 @@ func TestSkipUnreadable(t *testing.T) {
 
 	if got := hits(t, db); got != 1 {
 		t.Errorf("hits = %d, want 1", got)
+	}
+}
+
+// A context that ends after its first n checks.
+type countdown struct {
+	context.Context
+
+	n int
+}
+
+func (c *countdown) Err() error {
+	if c.n--; c.n < 0 {
+		return context.Canceled
+	}
+
+	return nil
+}
+
+// A read whose context ends stops before its next line and writes nothing, though its Result counts the lines it read.
+func TestReadStopped(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, gets(0, 3))
+	r := reader(t, db, path)
+
+	for _, tc := range []struct {
+		checks int
+		want   Result
+	}{
+		{0, Result{}},
+		{2, Result{Counted: 2}},
+	} {
+		res, err := r.Read(&countdown{Context: t.Context(), n: tc.checks})
+		if res != tc.want || !errors.Is(err, context.Canceled) {
+			t.Errorf("Read stopped after %d checks = %+v, %v; want %+v, context.Canceled", tc.checks, res, err, tc.want)
+		}
+	}
+
+	if _, ok, err := db.State(path); ok || err != nil || hits(t, db) != 0 {
+		t.Errorf("the stopped reads wrote: a state %v, %v, %d hits", ok, err, hits(t, db))
+	}
+
+	if got := read(t, r); got != (Result{Counted: 3}) {
+		t.Errorf("next Read = %+v, want 3 counted", got)
 	}
 }
 
@@ -493,7 +538,7 @@ func TestBadState(t *testing.T) {
 			t.Fatalf("reopen: %v", err)
 		}
 
-		if _, err := reader(t, db, path).Read(); err == nil {
+		if _, err := reader(t, db, path).Read(t.Context()); err == nil {
 			t.Errorf("Read with a state %s: no error", name)
 		}
 
@@ -528,7 +573,7 @@ func TestFlushError(t *testing.T) {
 
 	t.Cleanup(func() { _ = db.Close() })
 
-	if _, err := reader(t, db, path).Read(); err == nil {
+	if _, err := reader(t, db, path).Read(t.Context()); err == nil {
 		t.Error("Read onto a corrupt store: no error")
 	}
 }
@@ -550,7 +595,7 @@ func TestDirectory(t *testing.T) {
 			t.Fatalf("mkdir: %v", err)
 		}
 
-		if _, err := reader(t, db, dir).Read(); err == nil {
+		if _, err := reader(t, db, dir).Read(t.Context()); err == nil {
 			t.Errorf("Read of the directory %s: no error", dir)
 		}
 	}
