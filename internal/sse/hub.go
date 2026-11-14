@@ -115,46 +115,54 @@ func (h *Hub) unsubscribe(ch chan struct{}) {
 
 // ServeHTTP sends an update at once, for a client that reconnects, and another after each Broadcast, with a comment
 // every Options.Keepalive. It ends when the client leaves, a write fails or the hub closes. A closed or full hub
-// answers 503.
+// answers 503, and a method other than GET 405. Each write sets a deadline and flushes through http.ResponseController,
+// so a wrapper of the server's ResponseWriter needs an Unwrap method: without one, a stream ends at once.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ch := h.subscribe()
-	if ch == nil {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+
+		return
+	}
+
+	updates := h.subscribe()
+	if updates == nil {
 		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 
 		return
 	}
-	defer h.unsubscribe(ch)
+	defer h.unsubscribe(updates)
 
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("X-Accel-Buffering", "no") // else nginx holds the events in its buffer
 
-	rc := http.NewResponseController(w)
-	send := func(s string) bool {
-		if rc.SetWriteDeadline(time.Now().Add(writeTimeout)) != nil {
+	controller := http.NewResponseController(w)
+	send := func(message string) bool {
+		if controller.SetWriteDeadline(time.Now().Add(writeTimeout)) != nil {
 			return false
 		}
 
-		if _, err := io.WriteString(w, s); err != nil {
+		if _, err := io.WriteString(w, message); err != nil {
 			return false
 		}
 
-		return rc.Flush() == nil
+		return controller.Flush() == nil
 	}
 
 	const update = "data: update\n\n"
 
-	t := time.NewTicker(h.opts.Keepalive)
-	defer t.Stop()
+	ticker := time.NewTicker(h.opts.Keepalive)
+	defer ticker.Stop()
 
-	for ok := send(update); ok; {
+	for alive := send(update); alive; {
 		select {
 		case <-r.Context().Done():
 			return
-		case _, open := <-ch:
-			ok = open && send(update)
-		case <-t.C:
-			ok = send(": keepalive\n\n")
+		case _, open := <-updates:
+			alive = open && send(update)
+		case <-ticker.C:
+			alive = send(": keepalive\n\n")
 		}
 	}
 }

@@ -336,3 +336,21 @@ func TestClose(t *testing.T) {
 		t.Errorf("%d streams open after Close", n)
 	}
 }
+
+// A method other than GET gets a 405 that allows GET, and takes no stream.
+func TestServeMethod(t *testing.T) {
+	hub := NewHub(Options{Keepalive: time.Hour, MaxStreams: 1})
+
+	for _, method := range []string{http.MethodHead, http.MethodPost} {
+		recorder := httptest.NewRecorder()
+		hub.ServeHTTP(recorder, httptest.NewRequest(method, "/api/stream", nil))
+
+		if recorder.Code != http.StatusMethodNotAllowed || recorder.Header().Get("Allow") != http.MethodGet {
+			t.Errorf("%s: status %d, Allow %q; want 405, GET", method, recorder.Code, recorder.Header().Get("Allow"))
+		}
+
+		if count := open(hub); count != 0 {
+			t.Errorf("%s: %d streams open", method, count)
+		}
+	}
+}
