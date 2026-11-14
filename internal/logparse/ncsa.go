@@ -67,7 +67,7 @@ func ParseNCSA(line []byte) (Event, error) {
 		userAgent = ""
 	}
 
-	requestTime, err := time.Parse(ncsaTime, timestamp)
+	requestTime, err := parseNCSATime(timestamp)
 	if err != nil {
 		return Event{}, errors.New("ncsa: time is invalid")
 	}
@@ -109,6 +109,16 @@ func ParseNCSA(line []byte) (Event, error) {
 	}
 
 	return event, nil
+}
+
+// Reads an NCSA timestamp. A leap second (second 60) reads as second 59, since time.Parse refuses it.
+func parseNCSATime(timestamp string) (time.Time, error) {
+	dateTime, zone, _ := strings.Cut(timestamp, " ")
+	if upToMinute, isLeap := strings.CutSuffix(dateTime, ":60"); isLeap {
+		timestamp = upToMinute + ":59 " + zone
+	}
+
+	return time.Parse(ncsaTime, timestamp)
 }
 
 // Returns the error of a field that does not read as a number.

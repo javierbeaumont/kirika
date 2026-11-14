@@ -113,6 +113,7 @@ func TestParseNCSAErrors(t *testing.T) {
 		{"not a log line", "ncsa: time does not start with [ at offset 14"},
 		{`192.0.2.1 - - [01/Jan/2000:00:00:00 +0000 "GET / HTTP/1.1"`, "ncsa: time has no closing ] at offset 58"},
 		{`192.0.2.1 - - [not a time] "GET / HTTP/1.1" 200 1`, "ncsa: time is invalid"},
+		{`192.0.2.1 - - [01/Jan/2000:00:59:61 +0100] "GET / HTTP/1.1" 200 1`, "ncsa: time is invalid"},
 		{`192.0.2.1 - - [01/Jan/0001:00:00:00 +0100] "GET / HTTP/1.1" 200 1`, "ncsa: time is outside years 1-9999"},
 		{`192.0.2.1 - - [01/Jan/2000:00:00:00 +0000] GET / 200 1`, "ncsa: request is not quoted at offset 43"},
 		{req[:len(req)-1] + ` 200 1`, "ncsa: request has no closing quote at offset 64"},
@@ -265,6 +266,21 @@ func TestParseNCSATimeZone(t *testing.T) {
 
 	want := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).Add(-2 * time.Hour)
 	if !got.Time.Equal(want) || got.Time.Location() != time.UTC {
+		t.Errorf("Time = %v, want %v", got.Time, want)
+	}
+}
+
+// A leap second (second 60) reads as second 59 of its minute, in its time zone.
+func TestParseNCSALeapSecond(t *testing.T) {
+	line := `1.2.3.4 - - [01/Jan/2000:00:59:60 +0100] "GET / HTTP/1.1" 200 1`
+
+	got, err := ParseNCSA([]byte(line))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	want := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).Add(-time.Second)
+	if !got.Time.Equal(want) {
 		t.Errorf("Time = %v, want %v", got.Time, want)
 	}
 }
