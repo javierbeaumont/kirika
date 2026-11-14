@@ -59,7 +59,7 @@ type caddyLine struct {
 func ParseCaddyJSON(line []byte) (Event, error) {
 	var c caddyLine
 	if err := json.Unmarshal(line, &c); err != nil {
-		return Event{}, fmt.Errorf("caddy: %w", err)
+		return Event{}, jsonError(err)
 	}
 
 	if c.Request.Method == "" {
@@ -67,7 +67,7 @@ func ParseCaddyJSON(line []byte) (Event, error) {
 	}
 
 	if c.Ts <= 0 || c.Ts >= maxTs {
-		return Event{}, fmt.Errorf("caddy: ts %v is missing or outside years 1970-9999", c.Ts)
+		return Event{}, errors.New("caddy: ts is missing or outside years 1970-9999")
 	}
 
 	clientIP := c.Request.ClientIP
@@ -78,7 +78,7 @@ func ParseCaddyJSON(line []byte) (Event, error) {
 	ev := Event{
 		ClientIP:  clientAddr(clientIP),
 		FirstPart: firstPart(headerFirst(c.RespHeaders, "Content-Range"), headerFirst(c.Request.Headers, "Range")),
-		Host:      vhost(c.Request.Host),
+		Host:      VHost(c.Request.Host),
 		Method:    c.Request.Method,
 		Path:      unreserved(stripQuery(c.Request.URI)),
 		Proto:     c.Request.Proto,
@@ -94,6 +94,26 @@ func ParseCaddyJSON(line []byte) (Event, error) {
 	}
 
 	return ev, nil
+}
+
+// Returns the error of a line that does not decode. A field below a header map is named by the map, since the client
+// chose the header's name.
+func jsonError(err error) error {
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) {
+		return errors.New("caddy: not JSON")
+	}
+
+	if typeErr.Field == "" {
+		return errors.New("caddy: not a JSON object")
+	}
+
+	f := strings.SplitN(typeErr.Field, ".", 3)
+	if f[0] != "request" || len(f) == 1 {
+		return fmt.Errorf("caddy: %s has the wrong type", f[0])
+	}
+
+	return fmt.Errorf("caddy: %s.%s has the wrong type", f[0], f[1])
 }
 
 // Reports whether a range starts at byte 0: the one a Content-Range response header sent ("bytes 0-99/100") or, without
@@ -124,10 +144,10 @@ func headerFirst(h map[string][]string, name string) string {
 	return h[key][0]
 }
 
-// Returns a Host header without the default port of either scheme, 80 or 443, or an empty one. Any other port stays,
-// since it usually serves another site, and a valid one loses its leading zeros. An IPv6 address without a port loses
-// its brackets.
-func vhost(host string) string {
+// VHost returns a host in the form Event.Host holds: without the default port of either scheme, 80 or 443, or an empty
+// one. Any other port stays, since it usually serves another site, and a valid one loses its leading zeros. An IPv6
+// address left without a port loses its brackets.
+func VHost(host string) string {
 	h, port, err := net.SplitHostPort(host)
 	if err != nil {
 		return unbracket(host)

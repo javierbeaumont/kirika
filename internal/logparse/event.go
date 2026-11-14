@@ -22,7 +22,7 @@
 package logparse
 
 import (
-	"fmt"
+	"errors"
 	"net"
 	"strings"
 	"time"
@@ -48,11 +48,11 @@ type Event struct {
 func (ev Event) check() error {
 	switch {
 	case ev.Size < 0:
-		return fmt.Errorf("negative size %d", ev.Size)
+		return errors.New("size is negative")
 	case ev.Status != 0 && (ev.Status < 100 || ev.Status > 999):
-		return fmt.Errorf("status %d is not a three-digit code", ev.Status)
+		return errors.New("status is not a three-digit code")
 	case ev.Time.Year() < 1 || ev.Time.Year() > 9999:
-		return fmt.Errorf("time %s is outside years 1-9999", ev.Time)
+		return errors.New("time is outside years 1-9999")
 	}
 
 	return nil

@@ -60,26 +60,42 @@ func TestParseCaddyJSONClientIP(t *testing.T) {
 	}
 }
 
+// Each error names the field it refused or says the line is not a JSON object, and quotes neither a value nor a
+// header's name.
 func TestParseCaddyJSONErrors(t *testing.T) {
-	for _, line := range [][]byte{
-		nil,
-		[]byte("not json"),
-		caddyEntry(`"946684800"`, "200", "1"),
-		caddyEntry("946684800", `"200"`, "1"),
-		caddyEntry("946684800", "200", `"1"`),
-		caddyEntry("946684800", "200.5", "1"),
-		caddyEntry("946684800", "200", "-1"),
-		caddyEntry("946684800", "-200", "1"),
-		caddyEntry("946684800", "99", "1"),
-		caddyEntry("946684800", "1000", "1"),
-		caddyEntry("0", "200", "1"),
-		caddyEntry("-1", "200", "1"),
-		caddyEntry("253402300800", "200", "1"),
-		caddyEntry("1e30", "200", "1"),
-		[]byte(`{"request":{"method":"GET","uri":"/"},"status":200,"size":1}`),
+	const wrongTs = "caddy: ts is missing or outside years 1970-9999"
+
+	for _, tc := range []struct {
+		line []byte
+		want string
+	}{
+		{nil, "caddy: not JSON"},
+		{[]byte(`192.0.2.1 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1`), "caddy: not JSON"},
+		{[]byte(`"192.0.2.1"`), "caddy: not a JSON object"},
+		{[]byte(`[192]`), "caddy: not a JSON object"},
+		{caddyEntry(`"946684800"`, "200", "1"), "caddy: ts has the wrong type"},
+		{caddyEntry("0", "200", "1"), wrongTs},
+		{caddyEntry("-1", "200", "1"), wrongTs},
+		{caddyEntry("253402300800", "200", "1"), wrongTs},
+		{caddyEntry("1e30", "200", "1"), wrongTs},
+		{[]byte(`{"request":{"method":"GET","uri":"/"},"status":200,"size":1}`), wrongTs},
+		{caddyEntry("946684800", `"200"`, "1"), "caddy: status has the wrong type"},
+		{caddyEntry("946684800", "200.5", "1"), "caddy: status has the wrong type"},
+		{caddyEntry("946684800", "1e400", "1"), "caddy: status has the wrong type"},
+		{caddyEntry("946684800", "-200", "1"), "caddy: status is not a three-digit code"},
+		{caddyEntry("946684800", "99", "1"), "caddy: status is not a three-digit code"},
+		{caddyEntry("946684800", "1000", "1"), "caddy: status is not a three-digit code"},
+		{caddyEntry("946684800", "200", `"1"`), "caddy: size has the wrong type"},
+		{caddyEntry("946684800", "200", "-1"), "caddy: size is negative"},
+		{caddyRequest(`"client_ip":192`), "caddy: request.client_ip has the wrong type"},
+		{caddyRequest(`"headers":{"X-192.0.2.1":"v"}`), "caddy: request.headers has the wrong type"},
+		{
+			[]byte(`{"ts":946684800,"request":{"method":"GET"},"resp_headers":{"X-192.0.2.1":"v"}}`),
+			"caddy: resp_headers has the wrong type",
+		},
 	} {
-		if _, err := ParseCaddyJSON(line); err == nil || errors.Is(err, ErrNotAccessLog) {
-			t.Errorf("ParseCaddyJSON(%s): err = %v, want a parse error", line, err)
+		if _, err := ParseCaddyJSON(tc.line); err == nil || err.Error() != tc.want {
+			t.Errorf("ParseCaddyJSON(%s): err = %v, want %q", tc.line, err, tc.want)
 		}
 	}
 }
@@ -240,7 +256,9 @@ func TestParseCaddyJSONRangeFixture(t *testing.T) {
 	}
 }
 
-func TestParseCaddyJSONHost(t *testing.T) {
+// VHost drops a default or empty port, the brackets of an IPv6 address left without one, and the leading zeros of a
+// valid port; caddy-json applies it to the Host header.
+func TestVHost(t *testing.T) {
 	for _, tc := range []struct{ host, want string }{
 		{"", ""},
 		{"::1", "::1"},
@@ -260,6 +278,10 @@ func TestParseCaddyJSONHost(t *testing.T) {
 		{"example.com:+80", "example.com:+80"},
 		{"example.com:070000", "example.com:070000"},
 	} {
+		if got := VHost(tc.host); got != tc.want {
+			t.Errorf("VHost(%q) = %q, want %q", tc.host, got, tc.want)
+		}
+
 		got, err := ParseCaddyJSON(caddyRequest(fmt.Sprintf(`"host":%q`, tc.host)))
 		if err != nil {
 			t.Fatalf("host %q: parse: %v", tc.host, err)

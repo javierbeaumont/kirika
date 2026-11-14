@@ -21,7 +21,8 @@ package logparse
 
 import "fmt"
 
-// Parser decodes a single raw access-log line into an Event.
+// Parser decodes a single raw access-log line into an Event. Its error names the field it refused, if any, never a
+// value: a line holds a client address.
 type Parser func(line []byte) (Event, error)
 
 // ByName returns the parser registered under a log-format name.

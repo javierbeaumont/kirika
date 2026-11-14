@@ -20,6 +20,7 @@
 package logparse
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -38,20 +39,20 @@ const ncsaTime = "02/Jan/2006:15:04:05 -0700"
 // host but no vhost, so Event.Host is left empty for the caller to fill.
 func ParseNCSA(line []byte) (Event, error) {
 	sc := &clfScanner{s: string(line)}
-	host := sc.plain()
-	sc.plain() // ident (ignored)
-	sc.plain() // authuser (ignored)
-	ts := sc.bracket()
+	host := sc.plain("client")
+	sc.plain("ident")
+	sc.plain("authuser")
+	ts := sc.bracket("time")
 
-	req, ok := sc.quote()
+	req, ok := sc.quote("request")
 	if !ok {
-		sc.fail("expected quoted request")
+		sc.fail("request", "is not quoted")
 	}
 
-	status := sc.plain()
-	size := sc.plain()
-	ref, _ := sc.quote() // Combined only
-	ua, _ := sc.quote()  // Combined only
+	status := sc.plain("status")
+	size := sc.plain("size")
+	ref, _ := sc.quote("referer")   // Combined only
+	ua, _ := sc.quote("user agent") // Combined only
 
 	if sc.err != nil {
 		return Event{}, fmt.Errorf("ncsa: %w", sc.err)
@@ -68,7 +69,7 @@ func ParseNCSA(line []byte) (Event, error) {
 
 	t, err := time.Parse(ncsaTime, ts)
 	if err != nil {
-		return Event{}, fmt.Errorf("ncsa: bad time %q: %w", ts, err)
+		return Event{}, errors.New("ncsa: time is invalid")
 	}
 
 	method, uri, proto := splitRequest(req)
@@ -87,7 +88,7 @@ func ParseNCSA(line []byte) (Event, error) {
 	if size != "-" {
 		n, err := strconv.ParseUint(size, 10, 63)
 		if err != nil {
-			return Event{}, fmt.Errorf("ncsa: bad size %q: %w", size, err)
+			return Event{}, numberError("size", err)
 		}
 
 		ev.Size = int64(n)
@@ -96,7 +97,7 @@ func ParseNCSA(line []byte) (Event, error) {
 	if status != "-" {
 		n, err := strconv.ParseUint(status, 10, 16)
 		if err != nil {
-			return Event{}, fmt.Errorf("ncsa: bad status %q: %w", status, err)
+			return Event{}, numberError("status", err)
 		}
 
 		ev.Status = int(n)
@@ -109,6 +110,15 @@ func ParseNCSA(line []byte) (Event, error) {
 	return ev, nil
 }
 
+// Returns the error of a field that does not read as a number.
+func numberError(field string, err error) error {
+	if errors.Is(err, strconv.ErrRange) {
+		return fmt.Errorf("ncsa: %s is out of range", field)
+	}
+
+	return fmt.Errorf("ncsa: %s is not a number", field)
+}
+
 // A scanner that walks a CLF line field by field.
 type clfScanner struct {
 	err error
@@ -117,7 +127,7 @@ type clfScanner struct {
 }
 
 // Reads a [...] field (its contents may include spaces).
-func (sc *clfScanner) bracket() string {
+func (sc *clfScanner) bracket(field string) string {
 	if sc.err != nil {
 		return ""
 	}
@@ -125,7 +135,7 @@ func (sc *clfScanner) bracket() string {
 	sc.skipSpaces()
 
 	if sc.i >= len(sc.s) || sc.s[sc.i] != '[' {
-		sc.fail("expected [")
+		sc.fail(field, "does not start with [")
 		return ""
 	}
 
@@ -137,7 +147,7 @@ func (sc *clfScanner) bracket() string {
 	}
 
 	if sc.i >= len(sc.s) {
-		sc.fail("unterminated [")
+		sc.fail(field, "has no closing ]")
 		return ""
 	}
 
@@ -147,14 +157,15 @@ func (sc *clfScanner) bracket() string {
 	return val
 }
 
-func (sc *clfScanner) fail(msg string) {
+// Stops the scan at its first error, which names the field and the current offset.
+func (sc *clfScanner) fail(field, problem string) {
 	if sc.err == nil {
-		sc.err = fmt.Errorf("%s at offset %d", msg, sc.i)
+		sc.err = fmt.Errorf("%s %s at offset %d", field, problem, sc.i)
 	}
 }
 
 // Reads a space-delimited field.
-func (sc *clfScanner) plain() string {
+func (sc *clfScanner) plain(field string) string {
 	if sc.err != nil {
 		return ""
 	}
@@ -167,7 +178,7 @@ func (sc *clfScanner) plain() string {
 	}
 
 	if sc.i == start {
-		sc.fail("expected field")
+		sc.fail(field, "is missing")
 	}
 
 	return sc.s[start:sc.i]
@@ -176,7 +187,7 @@ func (sc *clfScanner) plain() string {
 // Reads a "..." field and decodes its escapes: \xHH is the byte HH (how Apache and nginx log non-printable bytes), and
 // a backslash before any other byte yields that byte. ok is false when the next field is not a quote (a Common-format
 // line has no referer/user-agent).
-func (sc *clfScanner) quote() (string, bool) {
+func (sc *clfScanner) quote(field string) (string, bool) {
 	if sc.err != nil {
 		return "", false
 	}
@@ -211,7 +222,7 @@ func (sc *clfScanner) quote() (string, bool) {
 		}
 	}
 
-	sc.fail("unterminated quote")
+	sc.fail(field, "has no closing quote")
 
 	return "", false
 }

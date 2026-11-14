@@ -99,31 +99,38 @@ func TestParseNCSACommon(t *testing.T) {
 	}
 }
 
+// Each error names the field it refused, never its value, and the offset where the scan stopped if it could not delimit
+// the field.
 func TestParseNCSAErrors(t *testing.T) {
-	for _, bad := range []string{
-		"",
-		"not a log line",
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1"`,         // no status
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1 200 1`,    // unterminated quote
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 abc`, // non-numeric size
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 20x 1`,   // non-numeric status
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000 "GET / HTTP/1.1" 200 1`,    // unterminated [
-		`1.2.3.4 - - [not a time] "GET / HTTP/1.1" 200 1`,
-		`1.2.3.4 - - missing-brackets "GET / HTTP/1.1" 200 1`,
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 -1`,                   // negative size
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 +1`,                   // signed size
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 9223372036854775808`,  // size overflows int64
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" -200 1`,                   // negative status
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" +200 1`,                   // signed status
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 99 1`,                     // status below 100
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 1000 1`,                   // status above 999
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 70000 1`,                  // status overflows
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1 "https://r.example`, // unterminated referer
-		`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1 "-" "agent`,         // unterminated user agent
-		`1.2.3.4 - - [01/Jan/0001:00:00:00 +0100] "GET / HTTP/1.1" 200 1`,                    // year 0 in UTC
+	const req = `192.0.2.1 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1"`
+
+	for _, tc := range []struct{ line, want string }{
+		{"", "ncsa: client is missing at offset 0"},
+		{"192.0.2.1", "ncsa: ident is missing at offset 9"},
+		{"192.0.2.1 -", "ncsa: authuser is missing at offset 11"},
+		{"not a log line", "ncsa: time does not start with [ at offset 10"},
+		{`192.0.2.1 - - [01/Jan/2000:00:00:00 +0000 "GET / HTTP/1.1"`, "ncsa: time has no closing ] at offset 58"},
+		{`192.0.2.1 - - [not a time] "GET / HTTP/1.1" 200 1`, "ncsa: time is invalid"},
+		{`192.0.2.1 - - [01/Jan/0001:00:00:00 +0100] "GET / HTTP/1.1" 200 1`, "ncsa: time is outside years 1-9999"},
+		{`192.0.2.1 - - [01/Jan/2000:00:00:00 +0000] GET / 200 1`, "ncsa: request is not quoted at offset 43"},
+		{req[:len(req)-1] + ` 200 1`, "ncsa: request has no closing quote at offset 64"},
+		{req, "ncsa: status is missing at offset 59"},
+		{req + ` 20x 1`, "ncsa: status is not a number"},
+		{req + ` -200 1`, "ncsa: status is not a number"},
+		{req + ` +200 1`, "ncsa: status is not a number"},
+		{req + ` 70000 1`, "ncsa: status is out of range"},
+		{req + ` 99 1`, "ncsa: status is not a three-digit code"},
+		{req + ` 1000 1`, "ncsa: status is not a three-digit code"},
+		{req + ` 200`, "ncsa: size is missing at offset 63"},
+		{req + ` 200 abc`, "ncsa: size is not a number"},
+		{req + ` 200 -1`, "ncsa: size is not a number"},
+		{req + ` 200 +1`, "ncsa: size is not a number"},
+		{req + ` 200 9223372036854775808`, "ncsa: size is out of range"},
+		{req + ` 200 1 "https://r.example`, "ncsa: referer has no closing quote at offset 84"},
+		{req + ` 200 1 "-" "Mozilla`, "ncsa: user agent has no closing quote at offset 78"},
 	} {
-		if _, err := ParseNCSA([]byte(bad)); err == nil {
-			t.Errorf("ParseNCSA(%q): want error, got nil", bad)
+		if _, err := ParseNCSA([]byte(tc.line)); err == nil || err.Error() != tc.want {
+			t.Errorf("ParseNCSA(%q): err = %v, want %q", tc.line, err, tc.want)
 		}
 	}
 }
