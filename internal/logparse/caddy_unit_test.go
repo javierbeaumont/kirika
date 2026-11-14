@@ -195,6 +195,27 @@ func TestParseCaddyJSONHeaders(t *testing.T) {
 	}
 }
 
+// A line carries a User-Agent, even empty, only when its log keeps the request headers.
+func TestParseCaddyJSONHasUserAgent(t *testing.T) {
+	for _, tc := range []struct {
+		fields string
+		want   bool
+	}{
+		{`"host":"example.com"`, false},
+		{`"headers":{}`, true},
+		{`"headers":{"Accept":["*/*"]}`, true},
+	} {
+		got, err := ParseCaddyJSON(caddyRequest(tc.fields))
+		if err != nil {
+			t.Fatalf("%s: parse: %v", tc.fields, err)
+		}
+
+		if got.HasUserAgent != tc.want {
+			t.Errorf("%s: HasUserAgent = %v, want %v", tc.fields, got.HasUserAgent, tc.want)
+		}
+	}
+}
+
 // Checks where a range starts, from the response's Content-Range or else the request's Range.
 func TestParseCaddyJSONFirstPart(t *testing.T) {
 	for _, tc := range []struct {

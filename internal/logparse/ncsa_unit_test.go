@@ -50,8 +50,9 @@ func TestParseNCSACombined(t *testing.T) {
 		t.Errorf("request parse mismatch: %+v", got)
 	}
 
-	if got.Referer != "https://ref.example/page" || got.UserAgent != "Mozilla/5.0 (X11; Linux x86_64)" {
-		t.Errorf("referer/ua mismatch: %q / %q", got.Referer, got.UserAgent)
+	if got.Referer != "https://ref.example/page" || got.UserAgent != "Mozilla/5.0 (X11; Linux x86_64)" ||
+		!got.HasUserAgent {
+		t.Errorf("referer/ua mismatch: %q / %q, HasUserAgent %v", got.Referer, got.UserAgent, got.HasUserAgent)
 	}
 
 	if got.Size != 2326 || got.Status != 200 {
@@ -90,8 +91,9 @@ func TestParseNCSACommon(t *testing.T) {
 		t.Errorf("mismatch: %+v", got)
 	}
 
-	if got.Referer != "" || got.UserAgent != "" {
-		t.Errorf("common format should have no referer/ua, got %q / %q", got.Referer, got.UserAgent)
+	if got.Referer != "" || got.UserAgent != "" || got.HasUserAgent {
+		t.Errorf("common format should have no referer/ua, got %q / %q, HasUserAgent %v", got.Referer, got.UserAgent,
+			got.HasUserAgent)
 	}
 
 	if got.Size != 0 {
@@ -227,6 +229,10 @@ func TestParseNCSANoValue(t *testing.T) {
 	if got.Referer != "" || got.Size != 0 || got.Status != 0 || got.UserAgent != "" {
 		t.Errorf(`"-" fields should be empty or 0: %+v`, got)
 	}
+
+	if !got.HasUserAgent {
+		t.Error(`a "-" user agent is a field the log carries`)
+	}
 }
 
 func TestParseNCSARequestLine(t *testing.T) {
@@ -287,18 +293,22 @@ func TestParseNCSAEscapes(t *testing.T) {
 func TestParseNCSAFields(t *testing.T) {
 	const prefix = `1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1`
 
-	for _, tc := range []struct{ tail, referer, ua string }{
-		{` "https://ref.example/"`, "https://ref.example/", ""},
-		{` "https://ref.example/" "ua/1" "198.51.100.9"`, "https://ref.example/", "ua/1"},
-		{`   "https://ref.example/"   "ua/1"`, "https://ref.example/", "ua/1"},
+	for _, tc := range []struct {
+		tail, referer, userAgent string
+		hasUserAgent             bool
+	}{
+		{` "https://ref.example/"`, "https://ref.example/", "", false},
+		{` "https://ref.example/" "ua/1" "198.51.100.9"`, "https://ref.example/", "ua/1", true},
+		{`   "https://ref.example/"   "ua/1"`, "https://ref.example/", "ua/1", true},
 	} {
 		got, err := ParseNCSA([]byte(prefix + tc.tail))
 		if err != nil {
 			t.Fatalf("%q: parse: %v", tc.tail, err)
 		}
 
-		if got.Referer != tc.referer || got.UserAgent != tc.ua {
-			t.Errorf("%q: referer/ua = %q/%q, want %q/%q", tc.tail, got.Referer, got.UserAgent, tc.referer, tc.ua)
+		if got.Referer != tc.referer || got.UserAgent != tc.userAgent || got.HasUserAgent != tc.hasUserAgent {
+			t.Errorf("%q: referer/ua/HasUserAgent = %q/%q/%v, want %q/%q/%v", tc.tail, got.Referer, got.UserAgent,
+				got.HasUserAgent, tc.referer, tc.userAgent, tc.hasUserAgent)
 		}
 	}
 }

@@ -35,6 +35,7 @@ import (
 
 	"github.com/javierbeaumont/kirika/internal/kvstore"
 	"github.com/javierbeaumont/kirika/internal/logparse"
+	"github.com/javierbeaumont/kirika/internal/uaclass"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -797,6 +798,31 @@ func TestCountOptions(t *testing.T) {
 	totals, err := db.Totals("h", "2000", kvstore.Filter{Status: kvstore.AllStatuses})
 	if err != nil || totals.Hits != 1 {
 		t.Errorf("hits of every status = %d, %v; want 1", totals.Hits, err)
+	}
+}
+
+// With NoUserAgent, a client is a human of kind unknown, whether its line names a browser or none.
+func TestNoUserAgent(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	browser := ncsa("10.0.0.1", "GET", "/", base)
+	noClient := strings.Replace(ncsa("10.0.0.2", "GET", "/", base), `"Mozilla/5.0 (X11; Linux x86_64)"`, `"-"`, 1)
+	writeLog(t, path, browser+"\n"+noClient+"\n")
+
+	options := DefaultOptions()
+	options.DefaultHost = "h"
+	options.NoUserAgent = true
+	options.Now = func() time.Time { return base }
+
+	read(t, newReader(t, db, path, options))
+
+	kinds, err := db.Dim("h", "c", "2000", kvstore.Filter{}) // c: the client kind
+	if err != nil {
+		t.Fatalf("Dim: %v", err)
+	}
+
+	if len(kinds) != 1 || kinds[uaclass.Unknown].Hits != 2 {
+		t.Errorf("human hits per client kind = %v, want 2 of %s", kinds, uaclass.Unknown)
 	}
 }
 

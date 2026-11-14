@@ -57,43 +57,46 @@ type caddyLine struct {
 // ParseCaddyJSON parses a single Caddy JSON access-log line into an Event. It returns ErrNotAccessLog for well-formed
 // JSON that is not a request entry.
 func ParseCaddyJSON(line []byte) (Event, error) {
-	var c caddyLine
-	if err := json.Unmarshal(line, &c); err != nil {
+	var entry caddyLine
+	if err := json.Unmarshal(line, &entry); err != nil {
 		return Event{}, jsonError(err)
 	}
 
-	if c.Request.Method == "" {
+	if entry.Request.Method == "" {
 		return Event{}, ErrNotAccessLog
 	}
 
-	if c.Ts <= 0 || c.Ts >= maxTs {
+	if entry.Ts <= 0 || entry.Ts >= maxTs {
 		return Event{}, errors.New("caddy: ts is missing or outside years 1970-9999")
 	}
 
-	clientIP := c.Request.ClientIP
+	clientIP := entry.Request.ClientIP
 	if clientIP == "" {
-		clientIP = c.Request.RemoteIP
+		clientIP = entry.Request.RemoteIP
 	}
 
-	ev := Event{
-		ClientIP:  clientAddr(clientIP),
-		FirstPart: firstPart(headerFirst(c.RespHeaders, "Content-Range"), headerFirst(c.Request.Headers, "Range")),
-		Host:      VHost(c.Request.Host),
-		Method:    c.Request.Method,
-		Path:      unreserved(stripQuery(c.Request.URI)),
-		Proto:     c.Request.Proto,
-		Referer:   headerFirst(c.Request.Headers, "Referer"),
-		Size:      c.Size,
-		Status:    c.Status,
-		Time:      unixFloat(c.Ts),
-		URI:       c.Request.URI,
-		UserAgent: headerFirst(c.Request.Headers, "User-Agent"),
+	headers := entry.Request.Headers
+
+	event := Event{
+		ClientIP:     clientAddr(clientIP),
+		FirstPart:    firstPart(headerFirst(entry.RespHeaders, "Content-Range"), headerFirst(headers, "Range")),
+		HasUserAgent: headers != nil,
+		Host:         VHost(entry.Request.Host),
+		Method:       entry.Request.Method,
+		Path:         unreserved(stripQuery(entry.Request.URI)),
+		Proto:        entry.Request.Proto,
+		Referer:      headerFirst(headers, "Referer"),
+		Size:         entry.Size,
+		Status:       entry.Status,
+		Time:         unixFloat(entry.Ts),
+		URI:          entry.Request.URI,
+		UserAgent:    headerFirst(headers, "User-Agent"),
 	}
-	if err := ev.check(); err != nil {
+	if err := event.check(); err != nil {
 		return Event{}, fmt.Errorf("caddy: %w", err)
 	}
 
-	return ev, nil
+	return event, nil
 }
 
 // Returns the error of a line that does not decode. A field below a header map is named by the map, since the client

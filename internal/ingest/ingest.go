@@ -51,6 +51,7 @@ type Options struct {
 	DefaultHost string           // the host of a line whose log names none, put in the form logparse.VHost returns
 	Log         *slog.Logger     // where each line not counted is told, at debug level; nil tells nothing
 	Methods     []string         // the methods whose lines count; a line with another is dropped
+	NoUserAgent bool             // the log carries no User-Agent, even where a line seems to hold an empty one
 	Now         func() time.Time // the clock of the 24 hours a line may be ahead; nil is time.Now
 }
 
@@ -98,43 +99,57 @@ type Reader struct {
 	path    string // absolute, the key of the log's state
 }
 
-// New returns a reader of the log at path that parses its lines with parse and counts them into db by the rules of o.
-// It refuses a visit timeout that is not positive, a nil parser, an empty method list and a method that is empty or not
-// in upper case.
-func New(db *kvstore.DB, path string, parse logparse.Parser, o Options) (*Reader, error) {
-	if err := o.check(parse); err != nil {
+// New returns a reader of the log at path that parses its lines with parse and counts them into db by the rules of
+// options. It refuses a visit timeout that is not positive, a nil parser, an empty method list and a method that is
+// empty or not in upper case.
+func New(db *kvstore.DB, path string, parse logparse.Parser, options Options) (*Reader, error) {
+	if err := options.check(parse); err != nil {
 		return nil, err
 	}
 
-	abs, err := filepath.Abs(path)
+	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
 
-	r := &Reader{
-		count:   o.Count,
+	reader := &Reader{
+		count:   options.Count,
 		db:      db,
-		host:    logparse.VHost(o.DefaultHost),
-		log:     o.Log,
+		host:    logparse.VHost(options.DefaultHost),
+		log:     options.Log,
 		methods: map[string]bool{},
-		now:     o.Now,
+		now:     options.Now,
 		parse:   parse,
-		path:    abs,
+		path:    absolute,
 	}
 
-	for _, m := range o.Methods {
-		r.methods[m] = true
+	for _, method := range options.Methods {
+		reader.methods[method] = true
 	}
 
-	if r.log == nil {
-		r.log = slog.New(slog.DiscardHandler)
+	if options.NoUserAgent {
+		reader.parse = withoutUserAgent(parse)
 	}
 
-	if r.now == nil {
-		r.now = time.Now
+	if reader.log == nil {
+		reader.log = slog.New(slog.DiscardHandler)
 	}
 
-	return r, nil
+	if reader.now == nil {
+		reader.now = time.Now
+	}
+
+	return reader, nil
+}
+
+// Returns parse with each event read as one whose log carries no User-Agent.
+func withoutUserAgent(parse logparse.Parser) logparse.Parser {
+	return func(line []byte) (logparse.Event, error) {
+		event, err := parse(line)
+		event.HasUserAgent = false
+
+		return event, err
+	}
 }
 
 // Returns why New refuses o or parse, if it does.

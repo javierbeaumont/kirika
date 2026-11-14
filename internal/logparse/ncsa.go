@@ -38,76 +38,77 @@ const ncsaTime = "02/Jan/2006:15:04:05 -0700"
 // The last two quoted fields (Combined) are optional, and fields after them are ignored. NCSA lines carry the client
 // host but no vhost, so Event.Host is left empty for the caller to fill.
 func ParseNCSA(line []byte) (Event, error) {
-	sc := &clfScanner{s: string(line)}
-	host := sc.plain("client")
-	sc.plain("ident")
-	sc.untilBracket("authuser")
-	ts := sc.bracket("time")
+	scanner := &clfScanner{s: string(line)}
+	client := scanner.plain("client")
+	scanner.plain("ident")
+	scanner.untilBracket("authuser")
+	timestamp := scanner.bracket("time")
 
-	req, ok := sc.quote("request")
+	request, ok := scanner.quote("request")
 	if !ok {
-		sc.fail("request", "is not quoted")
+		scanner.fail("request", "is not quoted")
 	}
 
-	status := sc.plain("status")
-	size := sc.plain("size")
-	ref, _ := sc.quote("referer")   // Combined only
-	ua, _ := sc.quote("user agent") // Combined only
+	status := scanner.plain("status")
+	size := scanner.plain("size")
+	referer, _ := scanner.quote("referer")                 // Combined only
+	userAgent, hasUserAgent := scanner.quote("user agent") // Combined only
 
-	if sc.err != nil {
-		return Event{}, fmt.Errorf("ncsa: %w", sc.err)
+	if scanner.err != nil {
+		return Event{}, fmt.Errorf("ncsa: %w", scanner.err)
 	}
 
 	// NCSA logs a literal "-" for an absent referer/user-agent.
-	if ref == "-" {
-		ref = ""
+	if referer == "-" {
+		referer = ""
 	}
 
-	if ua == "-" {
-		ua = ""
+	if userAgent == "-" {
+		userAgent = ""
 	}
 
-	t, err := time.Parse(ncsaTime, ts)
+	requestTime, err := time.Parse(ncsaTime, timestamp)
 	if err != nil {
 		return Event{}, errors.New("ncsa: time is invalid")
 	}
 
-	method, uri, proto := splitRequest(req)
+	method, uri, proto := splitRequest(request)
 
-	ev := Event{
-		ClientIP:  clientAddr(host),
-		Method:    method,
-		Path:      unreserved(stripQuery(uri)),
-		Proto:     proto,
-		Referer:   ref,
-		Time:      t.UTC(),
-		URI:       uri,
-		UserAgent: ua,
+	event := Event{
+		ClientIP:     clientAddr(client),
+		HasUserAgent: hasUserAgent,
+		Method:       method,
+		Path:         unreserved(stripQuery(uri)),
+		Proto:        proto,
+		Referer:      referer,
+		Time:         requestTime.UTC(),
+		URI:          uri,
+		UserAgent:    userAgent,
 	}
 
 	if size != "-" {
-		n, err := strconv.ParseUint(size, 10, 63)
+		bytes, err := strconv.ParseUint(size, 10, 63)
 		if err != nil {
 			return Event{}, numberError("size", err)
 		}
 
-		ev.Size = int64(n)
+		event.Size = int64(bytes)
 	}
 
 	if status != "-" {
-		n, err := strconv.ParseUint(status, 10, 16)
+		code, err := strconv.ParseUint(status, 10, 16)
 		if err != nil {
 			return Event{}, numberError("status", err)
 		}
 
-		ev.Status = int(n)
+		event.Status = int(code)
 	}
 
-	if err := ev.check(); err != nil {
+	if err := event.check(); err != nil {
 		return Event{}, fmt.Errorf("ncsa: %w", err)
 	}
 
-	return ev, nil
+	return event, nil
 }
 
 // Returns the error of a field that does not read as a number.

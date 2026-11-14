@@ -30,18 +30,19 @@ import (
 
 // Event is one normalized access-log record. Fields kirika does not use are dropped.
 type Event struct {
-	ClientIP  string    // client address, without a port
-	FirstPart bool      // a partial response known to start at byte 0
-	Host      string    // vhost, without port 80 or 443 (e.g. "example.com", "example.com:8080")
-	Method    string    // HTTP method (GET, POST, ...)
-	Path      string    // URI without its query string, with unreserved characters decoded
-	Proto     string    // e.g. "HTTP/1.1"
-	Referer   string    // Referer header
-	Size      int64     // response body size in bytes, never negative
-	Status    int       // HTTP status code, 100-999, or 0 when the log has none
-	Time      time.Time // request time, UTC, in years 1-9999
-	URI       string    // raw request target, query string included
-	UserAgent string    // User-Agent header
+	ClientIP     string    // client address, without a port
+	FirstPart    bool      // a partial response known to start at byte 0
+	HasUserAgent bool      // the log carries a User-Agent field, empty or not
+	Host         string    // vhost, without port 80 or 443 (e.g. "example.com", "example.com:8080")
+	Method       string    // HTTP method (GET, POST, ...)
+	Path         string    // URI without its query string, with unreserved characters decoded
+	Proto        string    // e.g. "HTTP/1.1"
+	Referer      string    // Referer header
+	Size         int64     // response body size in bytes, never negative
+	Status       int       // HTTP status code, 100-999, or 0 when the log has none
+	Time         time.Time // request time, UTC, in years 1-9999
+	URI          string    // raw request target, query string included
+	UserAgent    string    // User-Agent header
 }
 
 // Returns an error for a field outside the range Event documents.

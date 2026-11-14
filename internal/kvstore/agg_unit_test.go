@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/javierbeaumont/kirika/internal/logparse"
+	"github.com/javierbeaumont/kirika/internal/uaclass"
 )
 
 // Returns an empty batch, with no store, that counts by the rules of o in loc.
@@ -130,15 +131,20 @@ func TestApply(t *testing.T) {
 
 // Checks the class each request is counted in, and its client kind.
 func TestClasses(t *testing.T) {
-	ua := func(ev logparse.Event, ua string) logparse.Event {
-		ev.UserAgent = ua
+	withUserAgent := func(event logparse.Event, userAgent string) logparse.Event {
+		event.UserAgent = userAgent
 
-		return ev
+		return event
+	}
+	withoutUserAgent := func(event logparse.Event) logparse.Event {
+		event.HasUserAgent, event.UserAgent = false, ""
+
+		return event
 	}
 
 	for _, tc := range []struct {
 		name  string
-		ev    logparse.Event
+		event logparse.Event
 		bot   bool
 		group int
 	}{
@@ -153,34 +159,43 @@ func TestClasses(t *testing.T) {
 		{"500", page("h", "/", 500, 1, base), false, groupError},
 		{"999", page("h", "/", 999, 1, base), false, groupError},
 		{"no status", page("h", "/", 0, 1, base), false, groupError},
-		{"bot marker", ua(page("h", "/", 200, 1, base), botUA), true, groupCorrect},
-		{"empty user agent", ua(page("h", "/", 404, 1, base), ""), true, groupError},
+		{"bot marker", withUserAgent(page("h", "/", 200, 1, base), botUA), true, groupCorrect},
+		{"empty user agent", withUserAgent(page("h", "/", 404, 1, base), ""), true, groupError},
+		{"no user agent in the log", withoutUserAgent(page("h", "/", 404, 1, base)), false, groupError},
 		{"robots.txt", page("h", "/robots.txt", 200, 1, base), true, groupCorrect},
 		{"robots.txt in any case", page("h", "/x/ROBOTS.TXT", 200, 1, base), true, groupCorrect},
 		{"robots.txt as a prefix", page("h", "/robots.txt.bak", 200, 1, base), false, groupCorrect},
+		{
+			"robots.txt with no user agent in the log", withoutUserAgent(page("h", "/robots.txt", 200, 1, base)), true,
+			groupCorrect,
+		},
 	} {
-		b := applied(tc.ev)
+		batch := applied(tc.event)
 
-		got := b.d[string(timeKey(tagDay, "h", base.Format("20060102")))]
+		got := batch.d[string(timeKey(tagDay, "h", base.Format("20060102")))]
 		if want := newClass(tc.bot, tc.group); len(got) != 1 || got[0].class != want {
 			t.Errorf("%s: counted in %+v, want class %d only", tc.name, got, want)
 		}
 
-		client := "desktop"
-		if tc.bot {
-			client = "bot"
+		clientKind := uaclass.Desktop
+
+		switch {
+		case tc.bot:
+			clientKind = uaclass.Bot
+		case !tc.event.HasUserAgent:
+			clientKind = uaclass.Unknown
 		}
 
 		all := Filter{Audience: AllAudiences, Status: AllStatuses}
-		ym := base.Format("200601")
+		month := base.Format("200601")
 
-		if got := counted(b, encKey(tagCli, "h", ym), all); len(got) != 1 || got[client].HitBandwidth != 1 {
-			t.Errorf("%s: clients = %+v, want %s", tc.name, got, client)
+		if got := counted(batch, encKey(tagCli, "h", month), all); len(got) != 1 || got[clientKind].HitBandwidth != 1 {
+			t.Errorf("%s: clients = %+v, want %s", tc.name, got, clientKind)
 		}
 
-		statuses := counted(b, encKey(tagStat, "h", ym), all)
-		if want := strconv.Itoa(tc.ev.Status); tc.ev.Status == 0 && len(statuses) != 0 ||
-			tc.ev.Status != 0 && (len(statuses) != 1 || statuses[want].HitBandwidth != 1) {
+		statuses := counted(batch, encKey(tagStat, "h", month), all)
+		if want := strconv.Itoa(tc.event.Status); tc.event.Status == 0 && len(statuses) != 0 ||
+			tc.event.Status != 0 && (len(statuses) != 1 || statuses[want].HitBandwidth != 1) {
 			t.Errorf("%s: statuses = %+v, want %q only, or none without a status", tc.name, statuses, want)
 		}
 	}

@@ -22,11 +22,12 @@ package uaclass
 
 import "strings"
 
-// Client kinds returned by Classify.
+// Client kinds: Classify returns all but Unknown, the kind of a client whose log carries no User-Agent.
 const (
 	Bot     = "bot"
 	Desktop = "desktop"
 	Mobile  = "mobile"
+	Unknown = "unknown"
 )
 
 // Substrings common to crawlers and automated clients.

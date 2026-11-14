@@ -49,7 +49,7 @@ const (
 	tagURL  = "u"  // path
 	tagStat = "s"  // HTTP status
 	tagRef  = "r"  // referrer
-	tagCli  = "c"  // client kind: desktop or mobile for a human, bot for a bot
+	tagCli  = "c"  // client kind: desktop, mobile or unknown for a human, bot for a bot
 
 	// Of these two, only Visits counts: the visits that began or ended on a page.
 	tagEntry = "e" // path
@@ -140,54 +140,59 @@ func (db *DB) NewBatch(o Options) *Batch {
 	return b
 }
 
-// Apply counts one event in its class: in its hour, its day and each dimension of hostKey(ev.Host). It adds a hit, a
+// Apply counts one event in its class: in its hour, its day and each dimension of hostKey(event.Host). It adds a hit, a
 // page if the path is one, and its size as bandwidth. A 206 that does not start at byte 0 adds its size but no hit. A
 // path and a referrer count without their query, and an index page under its directory. A page also adds
-// clientKey(ev.ClientIP) to its month's unique visitors, and a correct one to the client's visits. A missing status,
-// referrer or client adds nothing there.
-func (b *Batch) Apply(ev logparse.Event) {
-	host := hostKey(ev.Host)
-	path := cutQuery(ev.Path, b.query)
+// clientKey(event.ClientIP) to its month's unique visitors, and a correct one to the client's visits. A missing status,
+// referrer or client adds nothing there. The client kind is uaclass.Bot when the path asks for robots.txt, else Unknown
+// when the log carries no User-Agent.
+func (b *Batch) Apply(event logparse.Event) {
+	host := hostKey(event.Host)
+	path := cutQuery(event.Path, b.query)
 
-	client := uaclass.Classify(ev.UserAgent)
-	if robotsTxt(path) {
-		client = uaclass.Bot
+	clientKind := uaclass.Unknown
+	if event.HasUserAgent {
+		clientKind = uaclass.Classify(event.UserAgent)
 	}
 
-	cl := newClass(client == uaclass.Bot, b.group(ev.Status))
+	if robotsTxt(path) {
+		clientKind = uaclass.Bot
+	}
 
-	c := Counts{HitBandwidth: ev.Size}
-	if ev.Status != http.StatusPartialContent || ev.FirstPart {
-		c.Hits = 1
+	trafficClass := newClass(clientKind == uaclass.Bot, b.group(event.Status))
+
+	counts := Counts{HitBandwidth: event.Size}
+	if event.Status != http.StatusPartialContent || event.FirstPart {
+		counts.Hits = 1
 	}
 
 	if isPage(path, b.notPage) {
-		c.Pages, c.PageBandwidth = c.Hits, ev.Size
+		counts.Pages, counts.PageBandwidth = counts.Hits, event.Size
 		path = fold(path, b.index)
 	}
 
-	t := ev.Time.In(b.loc)
-	b.add(timeKey(tagHour, host, t.Format("2006010215")), cl, c)
-	b.add(timeKey(tagDay, host, t.Format("20060102")), cl, c)
+	localTime := event.Time.In(b.loc)
+	b.add(timeKey(tagHour, host, localTime.Format("2006010215")), trafficClass, counts)
+	b.add(timeKey(tagDay, host, localTime.Format("20060102")), trafficClass, counts)
 
-	ym := t.Format("200601")
-	b.add(dimKey(tagURL, host, ym, clip(path)), cl, c)
-	b.add(dimKey(tagCli, host, ym, client), cl, c)
+	month := localTime.Format("200601")
+	b.add(dimKey(tagURL, host, month, clip(path)), trafficClass, counts)
+	b.add(dimKey(tagCli, host, month, clientKind), trafficClass, counts)
 
-	if ev.Status != 0 {
-		b.add(dimKey(tagStat, host, ym, strconv.Itoa(ev.Status)), cl, c)
+	if event.Status != 0 {
+		b.add(dimKey(tagStat, host, month, strconv.Itoa(event.Status)), trafficClass, counts)
 	}
 
-	if ref := cutQuery(ev.Referer, b.query); ref != "" {
-		b.add(dimKey(tagRef, host, ym, clip(ref)), cl, c)
+	if referrer := cutQuery(event.Referer, b.query); referrer != "" {
+		b.add(dimKey(tagRef, host, month, clip(referrer)), trafficClass, counts)
 	}
 
-	if ev.ClientIP != "" && c.Pages == 1 {
-		client := clientKey(ev.ClientIP)
-		b.addUnique(host, ym, cl, client)
+	if event.ClientIP != "" && counts.Pages == 1 {
+		visitor := clientKey(event.ClientIP)
+		b.addUnique(host, month, trafficClass, visitor)
 
-		if cl.group() == groupCorrect {
-			b.events = append(b.events, sessEvent{cl, host, client, clip(path), t})
+		if trafficClass.group() == groupCorrect {
+			b.events = append(b.events, sessEvent{trafficClass, host, visitor, clip(path), localTime})
 		}
 	}
 }

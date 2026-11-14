@@ -39,9 +39,11 @@ func at(d, h int) time.Time {
 	return base.AddDate(0, 0, d-1).Add(time.Duration(h) * time.Hour)
 }
 
-// Returns a request of host for path from a desktop browser, answered with status and size at t.
-func page(host, path string, status int, size int64, t time.Time) logparse.Event {
-	return logparse.Event{Host: host, Path: path, Status: status, Size: size, Time: t, UserAgent: desktopUA}
+// Returns a desktop browser's request of host for path at when, answered with status and size.
+func page(host, path string, status int, size int64, when time.Time) logparse.Event {
+	return logparse.Event{
+		HasUserAgent: true, Host: host, Path: path, Size: size, Status: status, Time: when, UserAgent: desktopUA,
+	}
 }
 
 // Returns the counters of n page hits of size bytes in all.
