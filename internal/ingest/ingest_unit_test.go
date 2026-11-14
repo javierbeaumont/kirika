@@ -29,6 +29,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/javierbeaumont/kirika/internal/kvstore"
 	"github.com/javierbeaumont/kirika/internal/logparse"
@@ -180,7 +181,7 @@ func TestJudge(t *testing.T) {
 	}
 }
 
-// Each fate adds to its own counter.
+// Each fate adds to its own counter, and an unreadable one to Unreadable too.
 func TestResultAdd(t *testing.T) {
 	for f, want := range map[fate]Result{
 		counted:   {Counted: 1},
@@ -195,6 +196,69 @@ func TestResultAdd(t *testing.T) {
 		var got Result
 		if got.add(f); got != want {
 			t.Errorf("add(%v) = %+v, want %+v", f, got, want)
+		}
+
+		if n, want := got.Unreadable(), map[bool]int{true: 1}[f.unreadable()]; n != want {
+			t.Errorf("add(%v): Unreadable = %d, want %d", f, n, want)
+		}
+	}
+}
+
+// New refuses a visit timeout that is not positive, a nil parser, an empty method list and a method that is empty or
+// not in upper case.
+func TestNewRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		timeout time.Duration
+		parse   logparse.Parser
+		methods []string
+		want    string
+	}{
+		{0, logparse.ParseNCSA, []string{"GET"}, "ingest: visit timeout 0s is not positive"},
+		{-time.Second, logparse.ParseNCSA, []string{"GET"}, "ingest: visit timeout -1s is not positive"},
+		{time.Hour, nil, []string{"GET"}, "ingest: no parser"},
+		{time.Hour, logparse.ParseNCSA, nil, "ingest: no method to count"},
+		{time.Hour, logparse.ParseNCSA, []string{}, "ingest: no method to count"},
+		{time.Hour, logparse.ParseNCSA, []string{"GET", "get"}, `ingest: method "get" is empty or not in upper case`},
+		{time.Hour, logparse.ParseNCSA, []string{"Get"}, `ingest: method "Get" is empty or not in upper case`},
+		{time.Hour, logparse.ParseNCSA, []string{""}, `ingest: method "" is empty or not in upper case`},
+		{time.Hour, logparse.ParseNCSA, []string{"GET", "M-SEARCH"}, ""},
+	} {
+		o := DefaultOptions()
+		o.Count.VisitTimeout, o.Methods = tc.timeout, tc.methods
+
+		r, err := New(nil, "access.log", tc.parse, o)
+
+		got := ""
+		if err != nil {
+			got = err.Error()
+		}
+
+		if got != tc.want || (err == nil) != (r != nil) {
+			t.Errorf("New with timeout %v, parser %v, methods %q: %v; want %q", tc.timeout, tc.parse != nil, tc.methods,
+				err, tc.want)
+		}
+	}
+}
+
+// New puts the default host in the form logparse.VHost returns.
+func TestNewDefaultHost(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                  "",
+		"example.com":       "example.com",
+		"example.com:443":   "example.com",
+		"example.com:08080": "example.com:8080",
+		"[2001:db8::1]:80":  "2001:db8::1",
+	} {
+		o := DefaultOptions()
+		o.DefaultHost = in
+
+		r, err := New(nil, "access.log", logparse.ParseNCSA, o)
+		if err != nil {
+			t.Fatalf("New with the default host %q: %v", in, err)
+		}
+
+		if r.host != want {
+			t.Errorf("the default host %q became %q, want %q", in, r.host, want)
 		}
 	}
 }

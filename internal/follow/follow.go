@@ -80,7 +80,7 @@ func report(log *slog.Logger, res ingest.Result) {
 	}
 
 	switch {
-	case res.Malformed+res.Binary+res.TooLong+res.BadDate > 0:
+	case res.Unreadable() > 0:
 		log.Warn("unreadable lines", attrs...)
 	case res != (ingest.Result{}):
 		log.Debug("lines read", attrs...)

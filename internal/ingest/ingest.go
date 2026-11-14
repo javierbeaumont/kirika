@@ -30,6 +30,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/javierbeaumont/kirika/internal/kvstore"
@@ -48,7 +49,7 @@ var ErrUnreadable = errors.New("ingest: too many unreadable lines in a row")
 // Options are the rules of a read.
 type Options struct {
 	Count       kvstore.Options  // the counting rules of the store's batch
-	DefaultHost string           // the host of a line whose log names none
+	DefaultHost string           // the host of a line whose log names none, put in the form logparse.VHost returns
 	Log         *slog.Logger     // where each line not counted is told, at debug level; nil tells nothing
 	Methods     []string         // the methods whose lines count; a line with another is dropped
 	Now         func() time.Time // the clock of the 24 hours a line may be ahead; nil is time.Now
@@ -80,6 +81,11 @@ type Result struct {
 	BadDate   int // unreadable: dated more than 24 hours after the read, or before the year 1000
 }
 
+// Unreadable returns the number of unreadable lines.
+func (res Result) Unreadable() int {
+	return res.Malformed + res.Binary + res.TooLong + res.BadDate
+}
+
 // Reader reads one log into a store, a read at a time.
 type Reader struct {
 	count   kvstore.Options
@@ -94,7 +100,13 @@ type Reader struct {
 }
 
 // New returns a reader of the log at path that parses its lines with parse and counts them into db by the rules of o.
+// It refuses a visit timeout that is not positive, a nil parser, an empty method list and a method that is empty or not
+// in upper case.
 func New(db *kvstore.DB, path string, parse logparse.Parser, o Options) (*Reader, error) {
+	if err := o.check(parse); err != nil {
+		return nil, err
+	}
+
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -103,7 +115,7 @@ func New(db *kvstore.DB, path string, parse logparse.Parser, o Options) (*Reader
 	r := &Reader{
 		count:   o.Count,
 		db:      db,
-		host:    o.DefaultHost,
+		host:    logparse.VHost(o.DefaultHost),
 		log:     o.Log,
 		methods: map[string]bool{},
 		now:     o.Now,
@@ -126,11 +138,31 @@ func New(db *kvstore.DB, path string, parse logparse.Parser, o Options) (*Reader
 	return r, nil
 }
 
+// Returns why New refuses o or parse, if it does.
+func (o Options) check(parse logparse.Parser) error {
+	switch {
+	case o.Count.VisitTimeout <= 0:
+		return fmt.Errorf("ingest: visit timeout %v is not positive", o.Count.VisitTimeout)
+	case parse == nil:
+		return errors.New("ingest: no parser")
+	case len(o.Methods) == 0:
+		return errors.New("ingest: no method to count")
+	}
+
+	for _, m := range o.Methods {
+		if m == "" || m != strings.ToUpper(m) {
+			return fmt.Errorf("ingest: method %q is empty or not in upper case", m)
+		}
+	}
+
+	return nil
+}
+
 // Read counts the lines written to the log since the last read and stores where it stopped, all in one transaction. It
 // goes on after the last line read when that line is still at its offset, and else reads the log from its start: the
 // path holds a new one. A last line with no newline yet waits for the next read. A read with no new line writes
-// nothing. maxRun unreadable lines in a row, counted across reads, stop it with ErrUnreadable before it writes
-// anything.
+// nothing. maxRun unreadable lines in a row, counted across reads, stop it with ErrUnreadable. A failed read writes
+// nothing, though its Result counts the lines it read before the error.
 func (r *Reader) Read() (Result, error) {
 	var res Result
 
