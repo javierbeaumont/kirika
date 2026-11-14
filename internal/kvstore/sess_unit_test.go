@@ -24,6 +24,7 @@ package kvstore
 import (
 	"bytes"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 )
@@ -50,65 +51,180 @@ func TestSessionID(t *testing.T) {
 	}
 }
 
+// A session reads back as written. A value of another format, of a class other than correct pages', malformed, with no
+// visit or with a time outside the years 1 to 9999 reads as none.
 func TestSessionCodec(t *testing.T) {
-	for _, s := range []session{
-		{},
-		{class: newClass(true, groupCorrect), exit: "/b", host: "h", last: -62135596800},
-		{last: 1 << 40},
+	for _, clientSession := range []session{
+		{class: humanVisits, host: "h", visits: []visit{{exit: "/b", last: 1}}},
+		{
+			class:  newClass(true, groupCorrect),
+			visits: []visit{{last: firstVisitTime}, {exit: "/b", last: lastVisitTime}},
+		},
 	} {
-		if got, ok := decodeSession(encodeSession(s)); !ok || got != s {
-			t.Errorf("round trip of %+v = %+v, %v", s, got, ok)
+		if got, ok := decodeSession(encodeSession(clientSession)); !ok || !reflect.DeepEqual(got, clientSession) {
+			t.Errorf("round trip of %+v = %+v, %v", clientSession, got, ok)
 		}
 	}
 
-	good := encodeSession(session{class: humanVisits, exit: "/b", host: "h", last: 1})
-	withClass := func(cl class) []byte { return append([]byte{sessionVersion, byte(cl)}, good[2:]...) }
+	good := encodeSession(session{class: humanVisits, host: "h", visits: []visit{{exit: "/b", last: 1}}})
+	upTo := func(end int, more ...byte) []byte { return append(slices.Clone(good[:end]), more...) }
+	withClass := func(visitClass class) []byte { return append([]byte{sessionVersion, byte(visitClass)}, good[2:]...) }
+	withLast := func(last int64) []byte {
+		return encodeSession(session{class: humanVisits, host: "h", visits: []visit{{exit: "/b", last: last}}})
+	}
 
-	for name, b := range map[string][]byte{
+	for name, encoded := range map[string][]byte{
 		"empty":           {},
 		"no class":        {sessionVersion},
 		"version 0":       append([]byte{0}, good[1:]...),
 		"error class":     withClass(newClass(false, groupError)),
 		"unknown class":   withClass(numClasses),
-		"cut varint":      {sessionVersion, 0, 0x80},
-		"varint overflow": append([]byte{sessionVersion, 0}, bytes.Repeat([]byte{0xff}, 11)...),
-		"missing strings": good[:len(good)-3],
-		"string too long": append(append([]byte(nil), good[:len(good)-3]...), 9, '/', 'b'),
-		"trailing bytes":  append(append([]byte(nil), good...), 0),
+		"no host":         upTo(2),
+		"host too long":   upTo(2, 5, 'h'),
+		"no visit":        upTo(4),
+		"cut varint":      upTo(4, 0x80),
+		"varint overflow": upTo(4, bytes.Repeat([]byte{0xff}, 11)...),
+		"no exit":         upTo(5),
+		"exit too long":   upTo(5, 9, '/', 'b'),
+		"trailing byte":   upTo(len(good), 0),
+		"before year 1":   withLast(firstVisitTime - 1),
+		"after year 9999": withLast(lastVisitTime + 1),
 	} {
-		if _, ok := decodeSession(b); ok {
-			t.Errorf("%s %x: decoded", name, b)
+		if _, ok := decodeSession(encoded); ok {
+			t.Errorf("%s %x: decoded", name, encoded)
 		}
 	}
 }
 
-// Two times are apart when more than d separates them, in either order.
-func TestApart(t *testing.T) {
-	d := time.Hour
+// The seconds between two Unix times are the same in either order.
+func TestDistance(t *testing.T) {
+	if distance(5, 2) != 3 || distance(2, 5) != 3 || distance(4, 4) != 0 {
+		t.Errorf("distance of 5 and 2, 2 and 5, 4 and 4 = %d, %d, %d; want 3, 3, 0", distance(5, 2), distance(2, 5),
+			distance(4, 4))
+	}
+}
+
+// A page joins the open visit whose latest page is nearest, if no more than the timeout before or after it in whole
+// seconds; else it opens a visit, counted with its entry page, and the other visits stay open. The page becomes its
+// visit's latest unless it is older. Of two visits equally near, it joins the one whose latest page is before it.
+func TestAddPage(t *testing.T) {
+	batch := batchIn(time.UTC, DefaultOptions())
+	start := base.Unix()
+	hour := int64(time.Hour / time.Second)
 
 	for _, tc := range []struct {
-		gap  time.Duration
-		want bool
-	}{{0, false}, {d, false}, {d + time.Nanosecond, true}} {
-		if got := apart(base, base.Add(tc.gap), d); got != tc.want {
-			t.Errorf("apart of %v later = %v, want %v", tc.gap, got, tc.want)
+		name   string
+		visits []visit
+		page   time.Time
+		want   []visit
+		opened bool
+	}{
+		{"first page", nil, base, []visit{{"/p", start}}, true},
+		{"a timeout after", []visit{{"/a", start}}, base.Add(time.Hour), []visit{{"/p", start + hour}}, false},
+		{"a timeout before", []visit{{"/a", start + hour}}, base, []visit{{"/a", start + hour}}, false},
+		{
+			"a fraction past the timeout",
+			[]visit{{"/a", start}},
+			base.Add(time.Hour + 999*time.Millisecond),
+			[]visit{{"/p", start + hour}},
+			false,
+		},
+		{
+			"a second past the timeout",
+			[]visit{{"/a", start}},
+			base.Add(time.Hour + time.Second),
+			[]visit{{"/a", start}, {"/p", start + hour + 1}},
+			true,
+		},
+		{
+			"nearest of two, the later",
+			[]visit{{"/a", start}, {"/b", start + hour*5/3}},
+			base.Add(55 * time.Minute),
+			[]visit{{"/a", start}, {"/b", start + hour*5/3}},
+			false,
+		},
+		{
+			"nearest of two, the earlier",
+			[]visit{{"/a", start}, {"/b", start + hour*5/3}},
+			base.Add(45 * time.Minute),
+			[]visit{{"/p", start + hour*3/4}, {"/b", start + hour*5/3}},
+			false,
+		},
+		{
+			"two equally near, the earlier first",
+			[]visit{{"/a", start}, {"/b", start + 2*hour}},
+			base.Add(time.Hour),
+			[]visit{{"/p", start + hour}, {"/b", start + 2*hour}},
+			false,
+		},
+		{
+			"two equally near, the later first",
+			[]visit{{"/b", start + 2*hour}, {"/a", start}},
+			base.Add(time.Hour),
+			[]visit{{"/b", start + 2*hour}, {"/p", start + hour}},
+			false,
+		},
+	} {
+		tallies := map[string]tally{}
+		clientSession := session{class: humanVisits, host: "h", visits: slices.Clone(tc.visits)}
+		addPage(&clientSession, sessEvent{humanVisits, "h", "c", "/p", tc.page}, batch, tallies)
+
+		if !reflect.DeepEqual(clientSession.visits, tc.want) {
+			t.Errorf("%s: visits = %+v, want %+v", tc.name, clientSession.visits, tc.want)
 		}
 
-		if got := apart(base.Add(tc.gap), base, d); got != tc.want {
-			t.Errorf("apart of %v earlier = %v, want %v", tc.gap, got, tc.want)
+		entry := dimKey(tagEntry, "h", tc.page.Format("200601"), "/p")
+		if opened := len(tallies[string(entry)]) > 0; opened != tc.opened {
+			t.Errorf("%s: opened a visit = %v, want %v", tc.name, opened, tc.opened)
 		}
 	}
 }
 
-// A visit's exit counts once, under its host and class, in the month its latest page was in the batch's zone.
+// A visit ends when it is more than the timeout behind its host's newest page in the batch, or more than abandonedAfter
+// before or after the batch's newest page, whatever its host. Then its exit counts and it leaves the session.
+func TestEndVisits(t *testing.T) {
+	batch := batchIn(time.UTC, DefaultOptions())
+	start := base.Unix()
+	hour := int64(time.Hour / time.Second)
+	abandoned := int64(abandonedAfter / time.Second)
+	old := base.AddDate(-50, 0, 0).Unix() // a negative Unix time
+
+	for _, tc := range []struct {
+		name, host string
+		newest     int64
+		last       int64
+		ends       bool
+	}{
+		{"a timeout behind its host's newest", "h", start, start - hour, false},
+		{"a second more", "h", start, start - hour - 1, true},
+		{"ahead of its host's newest", "h", start, start + 2*hour, false},
+		{"another host, abandonedAfter behind", "q", start, start - abandoned, false},
+		{"another host, a second more", "q", start, start - abandoned - 1, true},
+		{"another host, abandonedAfter ahead", "q", start, start + abandoned, false},
+		{"another host, a second further", "q", start, start + abandoned + 1, true},
+		{"another host, before 1970", "q", old, old - 2*hour, false},
+	} {
+		tallies := map[string]tally{}
+		clientSession := session{class: humanVisits, host: tc.host, visits: []visit{{"/p", tc.last}}}
+		newest := newestPages{all: tc.newest, byHost: map[string]int64{"h": tc.newest}}
+		ended := endVisits(&clientSession, newest, batch, tallies)
+
+		if (ended == 1) != tc.ends || (len(clientSession.visits) == 0) != tc.ends || (len(tallies) == 1) != tc.ends {
+			t.Errorf("%s: %d ended, %d left, %d exits; want ended = %v", tc.name, ended, len(clientSession.visits),
+				len(tallies), tc.ends)
+		}
+	}
+}
+
+// A visit's exit counts once, under its session's host and class, in the month of its latest page in the zone given.
 func TestEndVisit(t *testing.T) {
-	d := map[string]tally{}
+	tallies := map[string]tally{}
 	ahead := time.FixedZone("UTC+13", 13*60*60)
-	endVisit(d, session{class: humanVisits, exit: "/p", host: "h", last: base.Add(-time.Hour).Unix()}, ahead)
+	endVisit(tallies, session{class: humanVisits, host: "h"}, visit{"/p", base.Add(-time.Hour).Unix()}, ahead)
 
 	key := string(dimKey(tagExit, "h", base.Format("200601"), "/p"))
-	if want := map[string]tally{key: {{humanVisits, Counts{Visits: 1}}}}; !reflect.DeepEqual(d, want) {
-		t.Errorf("exits = %+v, want %+v", d, want)
+	if want := map[string]tally{key: {{humanVisits, Counts{Visits: 1}}}}; !reflect.DeepEqual(tallies, want) {
+		t.Errorf("exits = %+v, want %+v", tallies, want)
 	}
 }
 
