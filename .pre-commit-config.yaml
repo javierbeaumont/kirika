@@ -2,12 +2,15 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # CI stages nothing: check every file.
       - id: check-added-large-files
-        args: [--maxkb=100]
+        args: [--enforce-all, --maxkb=100]
       - id: check-case-conflict
       - id: check-executables-have-shebangs
       - id: check-illegal-windows-names
+      # Also outside a merge, where CI runs.
       - id: check-merge-conflict
+        args: [--assume-in-merge]
       - id: check-shebang-scripts-are-executable
       - id: check-symlinks
       - id: check-toml
@@ -37,6 +40,13 @@ repos:
         entry: make lint
         language: system
         types: [go]
+        pass_filenames: false
+        require_serial: true
+      - id: go-mod-tidy
+        name: go mod tidy (Docker)
+        entry: make tidy
+        language: system
+        files: '\.go$|^go\.(mod|sum)$'
         pass_filenames: false
         require_serial: true
       - id: test-helpers
@@ -73,6 +83,12 @@ repos:
     rev: v8.30.1
     hooks:
       - id: gitleaks
+      # The hook above scans what is staged, nothing in CI; this one scans every commit.
+      - id: gitleaks
+        alias: gitleaks-history
+        name: gitleaks (history)
+        entry: gitleaks git --redact --verbose
+        stages: [manual]
   - repo: https://github.com/fsfe/reuse-tool
     rev: v6.3.0
     hooks:

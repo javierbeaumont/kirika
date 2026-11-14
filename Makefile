@@ -23,7 +23,7 @@ LINT := docker compose run --rm -T lint
 # The test tiers, each the build tag of its test files.
 TIERS := unit integration
 
-.PHONY: build clean fmt lint sh test test-integration test-unit vet
+.PHONY: build clean fmt lint sh test test-integration test-unit tidy vet
 
 build:
 	$(GO) go build ./...
@@ -47,6 +47,10 @@ test: $(TIERS:%=test-%)
 # Also prints how many tests the tier has.
 $(TIERS:%=test-%): test-%:
 	$(GO) sh -c 'go test -tags $* ./... && echo "$*: $$(go test -tags $* -list . ./... | grep -c ^Test) tests"'
+
+# No TTY, as LINT.
+tidy:
+	docker compose run --rm -T go go mod tidy
 
 vet:
 	$(GO) sh -c 'for tier in $(TIERS); do go vet -tags $$tier ./... || exit; done'
