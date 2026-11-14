@@ -255,6 +255,17 @@ func TestDimPeriods(t *testing.T) {
 	}
 }
 
+// A year's Dim reads its months in one read transaction.
+func TestDimOneTransaction(t *testing.T) {
+	db := openStore(t)
+	before := db.b.Stats().TxN
+	dim(t, db, "h", tagURL, "2000", Filter{})
+
+	if got := db.b.Stats().TxN - before; got != 1 {
+		t.Errorf("a year's Dim started %d read transactions, want 1", got)
+	}
+}
+
 // A host is read in any case, a long one is clipped, and a host never reads another whose name starts with it.
 func TestHosts(t *testing.T) {
 	db := openStore(t)

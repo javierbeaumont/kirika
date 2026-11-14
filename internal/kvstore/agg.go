@@ -353,19 +353,22 @@ func months(date string) []string {
 	return out
 }
 
-// Calls fn with the rest and the counters of each agg key that starts with prefix and holds a class f counts. The rest
-// is valid only inside fn.
-func (db *DB) scan(prefix []byte, f Filter, fn func(rest []byte, c Counts)) error {
+// Calls yield with the rest and the counters of each agg key that starts with one of prefixes and holds a class counted
+// by filter, all in one read transaction. The rest is valid only inside yield.
+func (db *DB) scan(filter Filter, yield func(rest []byte, counts Counts), prefixes ...[]byte) error {
 	return db.b.View(func(tx *bolt.Tx) error {
 		cur := tx.Bucket(bktAgg).Cursor()
-		for k, v := cur.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = cur.Next() {
-			t, err := decodeTally(v)
-			if err != nil {
-				return err
-			}
 
-			if c, ok := f.sum(t); ok {
-				fn(k[len(prefix):], c)
+		for _, prefix := range prefixes {
+			for key, value := cur.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, value = cur.Next() {
+				stored, err := decodeTally(value)
+				if err != nil {
+					return err
+				}
+
+				if counts, ok := filter.sum(stored); ok {
+					yield(key[len(prefix):], counts)
+				}
 			}
 		}
 
@@ -382,7 +385,7 @@ func (db *DB) Totals(host, period string, f Filter) (Counts, error) {
 
 	var sum Counts
 
-	err = db.scan(timeKey(tagDay, hostKey(host), date), f, func(_ []byte, c Counts) { sum.add(c) })
+	err = db.scan(f, func(_ []byte, counts Counts) { sum.add(counts) }, timeKey(tagDay, hostKey(host), date))
 
 	return sum, err
 }
@@ -397,32 +400,36 @@ func (db *DB) Series(host, tag, period string, f Filter) ([]TimePoint, error) {
 
 	var out []TimePoint
 
-	err = db.scan(timeKey(tag, hostKey(host), date), f, func(rest []byte, c Counts) {
-		out = append(out, TimePoint{At: date + string(rest), Counts: c})
-	})
+	err = db.scan(f, func(rest []byte, counts Counts) {
+		out = append(out, TimePoint{At: date + string(rest), Counts: counts})
+	}, timeKey(tag, hostKey(host), date))
 
 	return out, err
 }
 
 // Dim returns a host's counters per value of a dimension tag over a period. Dimensions are kept per month, so a day
-// reads its whole month. A value with no class f counts is left out.
+// reads its whole month. A flush shows in all months of a year or in none. A value with no class f counts is left out.
 func (db *DB) Dim(host, tag, period string, f Filter) (map[string]Counts, error) {
 	date, err := checked(period, f)
 	if err != nil {
 		return nil, err
 	}
 
+	var prefixes [][]byte
+
+	for _, month := range months(date) {
+		prefixes = append(prefixes, encKey(tag, hostKey(host), month))
+	}
+
 	out := map[string]Counts{}
 
-	for _, ym := range months(date) {
-		err := db.scan(encKey(tag, hostKey(host), ym), f, func(rest []byte, c Counts) {
-			sum := out[string(rest)]
-			sum.add(c)
-			out[string(rest)] = sum
-		})
-		if err != nil {
-			return nil, err
-		}
+	err = db.scan(f, func(rest []byte, counts Counts) {
+		sum := out[string(rest)]
+		sum.add(counts)
+		out[string(rest)] = sum
+	}, prefixes...)
+	if err != nil {
+		return nil, err
 	}
 
 	return out, nil
