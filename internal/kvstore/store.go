@@ -45,8 +45,10 @@ var (
 	metaZone   = []byte("zone")
 )
 
-// Errors for a stored schema version this build refuses.
+// Errors Open returns.
 var (
+	errLocalZone = errors.New("kvstore: Local and localtime are each run's zone; " +
+		"a store needs a named one, such as Europe/Madrid")
 	errSchemaCorrupt = errors.New("kvstore: corrupt schema version")
 	errSchemaNewer   = errors.New("kvstore: store schema is newer than this build")
 	errZone          = errors.New("kvstore: the store keeps another time zone")
@@ -62,7 +64,8 @@ type DB struct {
 // Open opens the store at path, creating it if missing. timeout bounds the wait for another process to release the file
 // (0 waits forever). zone names the time zone of its hours, days and months, such as America/New_York. When empty, it
 // is the zone the store keeps or, for a new store, the system's, else UTC. A store written by a newer build or with a
-// corrupt schema version or salt is refused, and so is a zone the system does not know or other than the stored one.
+// corrupt schema version or salt is refused, and so is a zone the system does not know, other than the stored one, or
+// that is each run's: Local, and localtime, which Debian links to /etc/localtime.
 func Open(path string, timeout time.Duration, zone string) (*DB, error) {
 	b, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: timeout})
 	if errors.Is(err, berrors.ErrTimeout) {
@@ -128,6 +131,10 @@ func (db *DB) init(zone string) error {
 			return fmt.Errorf("%w: %s, not %s", errZone, stored, zone)
 		}
 
+		if zone == "Local" || zone == "localtime" {
+			return errLocalZone
+		}
+
 		loc, err := time.LoadLocation(zone)
 		if err != nil {
 			return fmt.Errorf("kvstore: %w", err)
@@ -186,11 +193,11 @@ func systemZone(getenv func(string) (string, bool), readlink, readFile func(stri
 	return "UTC"
 }
 
-// Returns the zone name in a path under a zoneinfo directory.
-func zoneinfoName(path string) (string, bool) {
+// Returns the zone name in a path under a zoneinfo directory; the directory itself names none.
+func zoneinfoName(path string) (name string, ok bool) {
 	_, name, found := strings.Cut(path, "zoneinfo/")
 
-	return name, found
+	return name, found && name != ""
 }
 
 // Returns the contents of the file at path.

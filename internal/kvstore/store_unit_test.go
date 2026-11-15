@@ -27,7 +27,8 @@ import (
 )
 
 // TZ names the zone when set, an empty one meaning UTC, or a path in it links to the zone. Without TZ, /etc/localtime
-// links to it, or /etc/timezone or /var/db/zoneinfo names a copy there. Else it is UTC.
+// links to it, or /etc/timezone or /var/db/zoneinfo names a copy there. Else it is UTC. A zoneinfo directory itself
+// names no zone.
 func TestSystemZone(t *testing.T) {
 	const (
 		local  = "/etc/localtime"
@@ -52,10 +53,12 @@ func TestSystemZone(t *testing.T) {
 		{tz: ":/etc/localtime", tzSet: true, files: paths{named: "Asia/Seoul"}, want: "Asia/Seoul"},
 		{tz: "/opt/zone", tzSet: true, links: paths{"/opt/zone": sydney}, want: "Australia/Sydney"},
 		{tz: "/opt/zone", tzSet: true, files: paths{named: "Asia/Seoul"}, want: "UTC"},
+		{tz: "/usr/share/zoneinfo/", tzSet: true, want: "UTC"},
 		{links: paths{local: sydney}, want: "Australia/Sydney"},
 		{links: paths{local: "/var/db/timezone/zoneinfo/America/Denver"}, want: "America/Denver"},
 		{links: paths{local: "/etc/zone"}, want: "UTC"},
 		{links: paths{local: "/etc/zone"}, files: paths{named: "America/Lima"}, want: "America/Lima"},
+		{links: paths{local: "/usr/share/zoneinfo/"}, files: paths{named: "America/Lima"}, want: "America/Lima"},
 		{files: paths{named: " Africa/Lagos\n", bsd: "Europe/Oslo"}, want: "Africa/Lagos"},
 		{files: paths{named: "\n", bsd: "Europe/Oslo\n"}, want: "Europe/Oslo"},
 		{want: "UTC"},

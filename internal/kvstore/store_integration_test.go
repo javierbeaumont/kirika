@@ -285,14 +285,30 @@ func openZone(t *testing.T, path, zone string) (string, error) {
 	return db.Zone(), nil
 }
 
-// A new store keeps the configured zone, else the system's. Reopened, it keeps that zone and refuses another. A zone
-// the system does not know is refused, whether configured or stored, and never kept.
+// A new store keeps the configured zone, else the system's. Reopened, it keeps that zone and refuses another. Local,
+// localtime or a zone the system does not know is refused, whether configured, stored or the system's, and never kept.
 func TestOpenZone(t *testing.T) {
+	refused := []string{"Local", "localtime", "Nowhere/Nothing"}
+	// Reports whether err refuses zone as it should: as each run's zone, unless the system does not know it.
+	refuses := func(zone string, err error) bool {
+		return err != nil && (zone == "Nowhere/Nothing" || errors.Is(err, errLocalZone))
+	}
+
+	for _, zone := range refused {
+		t.Setenv("TZ", zone)
+
+		if _, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), ""); !refuses(zone, err) {
+			t.Errorf("system zone %s: err = %v", zone, err)
+		}
+	}
+
 	t.Setenv("TZ", "America/Sao_Paulo")
 
 	path := filepath.Join(t.TempDir(), "kirika.db")
-	if _, err := openZone(t, path, "Nowhere/Nothing"); err == nil {
-		t.Error("unknown configured zone: no error")
+	for _, zone := range refused {
+		if _, err := openZone(t, path, zone); !refuses(zone, err) {
+			t.Errorf("configured zone %s: err = %v", zone, err)
+		}
 	}
 
 	if got, err := openZone(t, path, ""); got != "America/Sao_Paulo" {
@@ -315,10 +331,12 @@ func TestOpenZone(t *testing.T) {
 		t.Errorf("new store in UTC: %q, %v; want UTC over the system's", got, err)
 	}
 
-	setMeta(t, path, metaZone, []byte("Nowhere/Nothing"))
+	for _, zone := range refused {
+		setMeta(t, path, metaZone, []byte(zone))
 
-	if _, err := openZone(t, path, ""); err == nil {
-		t.Error("unknown stored zone: no error")
+		if _, err := openZone(t, path, ""); !refuses(zone, err) {
+			t.Errorf("stored zone %s: err = %v", zone, err)
+		}
 	}
 }
 
