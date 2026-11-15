@@ -38,7 +38,7 @@ type Event struct {
 	Path         string    // URI without its query string, with unreserved characters decoded
 	Proto        string    // e.g. "HTTP/1.1"
 	Referer      string    // Referer header
-	Size         int64     // response body size in bytes, never negative
+	Size         int64     // response size in bytes as the log counts it, never negative
 	Status       int       // HTTP status code, 100-999, or 0 when the log has none
 	Time         time.Time // request time, UTC, in years 1-9999
 	URI          string    // raw request target, query string included

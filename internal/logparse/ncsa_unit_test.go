@@ -356,3 +356,99 @@ func TestParseNCSARanges(t *testing.T) {
 		}
 	}
 }
+
+// The host is the first field without port 80 or 443. The port follows the last colon, as an IPv6 vhost may have no
+// brackets. The rest reads as Combined.
+func TestParseVHostCombined(t *testing.T) {
+	for vhost, want := range map[string]string{
+		"2001:db8::1:80":    "2001:db8::1",
+		"2001:db8::1:8080":  "[2001:db8::1]:8080",
+		"[2001:db8::1]:443": "2001:db8::1",
+		"example.com:443":   "example.com",
+		"example.com:80":    "example.com",
+		"example.com:8080":  "example.com:8080",
+	} {
+		line := vhost + ` 192.0.2.1 - - [01/Jan/2000:00:00:00 +0000] "GET /a HTTP/1.1" 200 1 "-" "ua/1"`
+
+		got, err := ParseVHostCombined([]byte(line))
+		if err != nil {
+			t.Fatalf("%s: parse: %v", line, err)
+		}
+
+		if got.Host != want || got.ClientIP != "192.0.2.1" || got.Path != "/a" || got.UserAgent != "ua/1" {
+			t.Errorf("%s: host, client, path, user agent = %q, %q, %q, %q; want %q, 192.0.2.1, /a, ua/1", line,
+				got.Host, got.ClientIP, got.Path, got.UserAgent, want)
+		}
+	}
+}
+
+// Parses real lines of Debian's other_vhosts_access.log: Apache with three vhosts, one with a path behind Basic auth.
+func TestParseVHostCombinedFixture(t *testing.T) {
+	raw, err := os.ReadFile("testdata/apache_vhost_combined.log")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	want := []struct {
+		host, method, path string
+		status             int
+		size               int64
+		referer, userAgent string
+	}{
+		{"example.com", "GET", "/", 200, 10958, "", "curl/8.14.1"},
+		{"example.com", "GET", "/blog/post-1", 200, 205, "https://ref.example/page", "Mozilla/5.0 (X11; Linux x86_64)"},
+		{"example.com", "GET", "/missing", 404, 474, "", "Googlebot/2.1 (+http://www.google.com/bot.html)"},
+		{"example.com", "HEAD", "/", 200, 255, "", "curl/8.14.1"},
+		{"example.com", "POST", "/blog/post-1", 200, 205, "", "curl/8.14.1"},
+		{"example.com", "GET", "/blog/post-1", 206, 243, "", "curl/8.14.1"},
+		{"example.com", "GET", "/", 200, 10958, "", `ua "quoted" [en]`},
+		{"example.com", "GET", "/private/", 200, 233, "", "curl/8.14.1"}, // user "alice smith"
+		{"example.com", "GET", "/private/", 401, 703, "", "curl/8.14.1"}, // user "a [b"
+		{"example.com", "GET", "/", 200, 13596, "", "curl/8.14.1"},       // port 443
+		{"example.org", "GET", "/", 200, 10958, "", "curl/8.14.1"},       // port 8080, logged as 80
+	}
+
+	lines := bytes.Split(bytes.TrimSpace(raw), []byte("\n"))
+	if len(lines) != len(want) {
+		t.Fatalf("fixture: got %d lines, want %d", len(lines), len(want))
+	}
+
+	for i, fields := range want {
+		got, err := ParseVHostCombined(lines[i])
+		if err != nil {
+			t.Fatalf("line %d: %v", i, err)
+		}
+
+		if got.ClientIP != "127.0.0.1" || !got.Time.Equal(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)) ||
+			!got.HasUserAgent || got.Host != fields.host || got.Method != fields.method || got.Path != fields.path ||
+			got.Status != fields.status || got.Size != fields.size || got.Referer != fields.referer ||
+			got.UserAgent != fields.userAgent {
+			t.Errorf("line %d: %+v; want client 127.0.0.1, 2000-01-01, a user agent, %+v", i, got, fields)
+		}
+	}
+}
+
+// An error names the format and the field; an offset counts from the start of the whole line. An NCSA line's IPv4
+// client has no port, whatever its user name.
+func TestParseVHostCombinedErrors(t *testing.T) {
+	const req = `192.0.2.1 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1"`
+
+	const userWithSpace = `192.0.2.1 - alice smith [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1`
+
+	for _, tc := range []struct{ line, want string }{
+		{"", "vhost-combined: vhost is missing at offset 0"},
+		{"80 " + req + " 200 1", "vhost-combined: vhost has no port at offset 2"},
+		{"example.com", "vhost-combined: vhost has no port at offset 11"},
+		{"example.com:65536 " + req + " 200 1", "vhost-combined: vhost has no port at offset 17"},
+		{"example.com:http " + req + " 200 1", "vhost-combined: vhost has no port at offset 16"},
+		{req + " 200 1", "vhost-combined: vhost has no port at offset 9"},
+		{userWithSpace, "vhost-combined: vhost has no port at offset 9"},
+		{"example.com:443", "vhost-combined: client is missing at offset 15"},
+		{"example.com:443 " + req, "vhost-combined: status is missing at offset 75"},
+		{"example.com:443 " + req + " 20x 1", "vhost-combined: status is not a number"},
+	} {
+		if _, err := ParseVHostCombined([]byte(tc.line)); err == nil || err.Error() != tc.want {
+			t.Errorf("ParseVHostCombined(%q): err = %v, want %q", tc.line, err, tc.want)
+		}
+	}
+}

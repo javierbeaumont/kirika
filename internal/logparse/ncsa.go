@@ -22,6 +22,7 @@ package logparse
 import (
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -38,7 +39,57 @@ const ncsaTime = "02/Jan/2006:15:04:05 -0700"
 // The last two quoted fields (Combined) are optional, and fields after them are ignored. NCSA lines carry the client
 // host but no vhost, so Event.Host is left empty for the caller to fill.
 func ParseNCSA(line []byte) (Event, error) {
+	event, err := parseCLF(&clfScanner{s: string(line)})
+	if err != nil {
+		return Event{}, fmt.Errorf("ncsa: %w", err)
+	}
+
+	return event, nil
+}
+
+// ParseVHostCombined parses one line of Apache's vhost_combined format, that of Debian's other_vhosts_access.log: the
+// vhost's name and canonical port, then a line ParseNCSA reads.
+//
+//	vhost:port host ident authuser [time] "request" status bytes ["referer" "user-agent"]
+//
+// Event.Host is the vhost, as VHost returns it. A first field with no port, as an NCSA line's IPv4 or named client, is
+// an error.
+func ParseVHostCombined(line []byte) (Event, error) {
 	scanner := &clfScanner{s: string(line)}
+
+	host, hasPort := vhostHost(scanner.plain("vhost"))
+	if !hasPort {
+		scanner.fail("vhost", "has no port")
+	}
+
+	event, err := parseCLF(scanner)
+	if err != nil {
+		return Event{}, fmt.Errorf("vhost-combined: %w", err)
+	}
+
+	event.Host = host
+
+	return event, nil
+}
+
+// Returns the vhost of a %v:%p field as VHost returns it, and false without a numeric port. The port follows the last
+// colon, as %v may be an IPv6 address without brackets.
+func vhostHost(field string) (host string, hasPort bool) {
+	colon := strings.LastIndexByte(field, ':')
+	if colon < 0 {
+		return "", false
+	}
+
+	port := field[colon+1:]
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return "", false
+	}
+
+	return VHost(net.JoinHostPort(unbracket(field[:colon]), port)), true
+}
+
+// Parses a Common or Combined line from where scanner stands.
+func parseCLF(scanner *clfScanner) (Event, error) {
 	client := scanner.plain("client")
 	scanner.plain("ident")
 	scanner.untilTime("authuser")
@@ -55,7 +106,7 @@ func ParseNCSA(line []byte) (Event, error) {
 	userAgent, hasUserAgent := scanner.quote("user agent") // Combined only
 
 	if scanner.err != nil {
-		return Event{}, fmt.Errorf("ncsa: %w", scanner.err)
+		return Event{}, scanner.err
 	}
 
 	// NCSA logs a literal "-" for an absent referer/user-agent.
@@ -69,7 +120,7 @@ func ParseNCSA(line []byte) (Event, error) {
 
 	requestTime, err := parseNCSATime(timestamp)
 	if err != nil {
-		return Event{}, errors.New("ncsa: time is invalid")
+		return Event{}, errors.New("time is invalid")
 	}
 
 	method, uri, proto := splitRequest(request)
@@ -105,7 +156,7 @@ func ParseNCSA(line []byte) (Event, error) {
 	}
 
 	if err := event.check(); err != nil {
-		return Event{}, fmt.Errorf("ncsa: %w", err)
+		return Event{}, err
 	}
 
 	return event, nil
@@ -124,10 +175,10 @@ func parseNCSATime(timestamp string) (time.Time, error) {
 // Returns the error of a field that does not read as a number.
 func numberError(field string, err error) error {
 	if errors.Is(err, strconv.ErrRange) {
-		return fmt.Errorf("ncsa: %s is out of range", field)
+		return fmt.Errorf("%s is out of range", field)
 	}
 
-	return fmt.Errorf("ncsa: %s is not a number", field)
+	return fmt.Errorf("%s is not a number", field)
 }
 
 // A scanner that walks a CLF line field by field.

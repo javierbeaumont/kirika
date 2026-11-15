@@ -32,6 +32,8 @@ func ByName(name string) (Parser, error) {
 		return ParseCaddyJSON, nil
 	case "ncsa":
 		return ParseNCSA, nil
+	case "vhost-combined":
+		return ParseVHostCombined, nil
 	default:
 		return nil, fmt.Errorf("logparse: unknown format %q", name)
 	}

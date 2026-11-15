@@ -23,20 +23,26 @@ package logparse
 
 import "testing"
 
-// Each name returns its own parser, which parses a line only that format accepts. Any other name is an error, the names
-// in upper case included.
+// Each name returns its own parser, told apart by the line it parses and the host it reads. Any other name is an error,
+// the names in upper case included.
 func TestByName(t *testing.T) {
-	for name, line := range map[string][]byte{
-		"caddy-json": caddyRequest(`"host":"example.com"`),
-		"ncsa":       []byte(`192.0.2.1 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1`),
+	const ncsa = `192.0.2.1 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1`
+
+	for name, tc := range map[string]struct {
+		line []byte
+		host string
+	}{
+		"caddy-json":     {caddyRequest(`"host":"example.com"`), "example.com"},
+		"ncsa":           {[]byte(ncsa), ""},
+		"vhost-combined": {[]byte("example.org:443 " + ncsa), "example.org"},
 	} {
 		p, err := ByName(name)
 		if err != nil {
 			t.Fatalf("ByName(%q): %v", name, err)
 		}
 
-		if _, err := p(line); err != nil {
-			t.Errorf("ByName(%q) parser: %v", name, err)
+		if got, err := p(tc.line); err != nil || got.Host != tc.host {
+			t.Errorf("ByName(%q) parser: host %q, error %v; want host %q", name, got.Host, err, tc.host)
 		}
 	}
 
