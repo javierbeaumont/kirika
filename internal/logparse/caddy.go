@@ -32,12 +32,13 @@ import (
 // The first Unix second of year 10000, past the years Event allows.
 const maxTs = 253402300800
 
-// ErrNotAccessLog is returned when a line is valid JSON but not a Caddy access entry (for example a server-startup log
-// line in a mixed log stream).
+// ErrNotAccessLog is returned for an entry of a logger other than an access log, whatever its other fields, and for a
+// line that decodes but has no request method, such as a server-startup line.
 var ErrNotAccessLog = errors.New("logparse: not a caddy access-log entry")
 
 // The subset of Caddy's JSON access-log schema that kirika consumes. Unknown fields are ignored by encoding/json.
 type caddyLine struct {
+	Logger  string `json:"logger"`
 	Request struct {
 		ClientIP string              `json:"client_ip"`
 		Headers  map[string][]string `json:"headers"`
@@ -54,11 +55,16 @@ type caddyLine struct {
 	Ts          float64             `json:"ts"`
 }
 
-// ParseCaddyJSON parses a single Caddy JSON access-log line into an Event. It returns ErrNotAccessLog for well-formed
-// JSON that is not a request entry.
+// ParseCaddyJSON parses a Caddy JSON access-log line into an Event, or returns ErrNotAccessLog.
 func ParseCaddyJSON(line []byte) (Event, error) {
 	var entry caddyLine
-	if err := json.Unmarshal(line, &entry); err != nil {
+
+	err := json.Unmarshal(line, &entry) // past a field of the wrong type, it decodes the others
+	if !accessLogger(entry.Logger) {
+		return Event{}, ErrNotAccessLog
+	}
+
+	if err != nil {
 		return Event{}, jsonError(err)
 	}
 
@@ -117,6 +123,12 @@ func jsonError(err error) error {
 	}
 
 	return fmt.Errorf("caddy: %s.%s has the wrong type", f[0], f[1])
+}
+
+// Reports whether a Caddy logger writes access entries. Caddy names an access log http.log.access or
+// http.log.access.NAME; an empty name counts as one.
+func accessLogger(name string) bool {
+	return name == "" || name == "http.log.access" || strings.HasPrefix(name, "http.log.access.")
 }
 
 // Reports whether a range starts at byte 0: the one a Content-Range response header sent ("bytes 0-99/100") or, without

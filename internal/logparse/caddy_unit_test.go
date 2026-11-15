@@ -87,6 +87,10 @@ func TestParseCaddyJSONErrors(t *testing.T) {
 		{caddyEntry("946684800", "1000", "1"), "caddy: status is not a three-digit code"},
 		{caddyEntry("946684800", "200", `"1"`), "caddy: size has the wrong type"},
 		{caddyEntry("946684800", "200", "-1"), "caddy: size is negative"},
+		{
+			[]byte(`{"logger":1,"ts":946684800,"request":{"method":"GET","uri":"/"}}`),
+			"caddy: logger has the wrong type",
+		},
 		{caddyRequest(`"client_ip":192`), "caddy: request.client_ip has the wrong type"},
 		{caddyRequest(`"headers":{"X-192.0.2.1":"v"}`), "caddy: request.headers has the wrong type"},
 		{
@@ -100,10 +104,37 @@ func TestParseCaddyJSONErrors(t *testing.T) {
 	}
 }
 
+// A line with no request method is no access entry, nor is another logger's entry with a field of the wrong type.
 func TestParseCaddyJSONNotAccessLog(t *testing.T) {
-	for _, line := range []string{`{}`, `null`, `{"level":"info","msg":"serving initial configuration"}`} {
+	for _, line := range []string{
+		`{}`,
+		`null`,
+		`{"level":"info","msg":"serving initial configuration"}`,
+		`{"logger":"tls","status":"valid"}`,
+	} {
 		if _, err := ParseCaddyJSON([]byte(line)); !errors.Is(err, ErrNotAccessLog) {
 			t.Errorf("ParseCaddyJSON(%s): err = %v, want ErrNotAccessLog", line, err)
+		}
+	}
+}
+
+// An entry with a request is an access when its logger is absent or an access log, and ErrNotAccessLog otherwise, even
+// with a field of the wrong type.
+func TestParseCaddyJSONLoggers(t *testing.T) {
+	const fields = `"ts":946684800,"request":{"client_ip":"192.0.2.1","method":"GET","uri":"/","headers":{}}`
+
+	for logger, access := range map[string]bool{
+		``:                                 true,
+		`"logger":"http.log.access",`:      true,
+		`"logger":"http.log.access.log0",`: true,
+		`"logger":"http.handlers.reverse_proxy",`: false,
+		`"logger":"http.log.accessible",`:         false,
+		`"logger":"http.log.error",`:              false,
+		`"logger":"http.log.error","size":"1kB",`: false,
+	} {
+		_, err := ParseCaddyJSON([]byte(`{` + logger + fields + `,"status":200}`))
+		if (err == nil) != access || !access && !errors.Is(err, ErrNotAccessLog) {
+			t.Errorf("logger %s: err = %v, want an access: %v", logger, err, access)
 		}
 	}
 }
