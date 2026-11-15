@@ -21,8 +21,12 @@ package kvstore
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"hash"
 
 	"github.com/axiomhq/hyperloglog"
 	bolt "go.etcd.io/bbolt"
@@ -30,6 +34,15 @@ import (
 
 // The precision of a sketch: 2^12 registers, a standard error of about 1.6%, in at most 4 KB.
 const hllPrecision = 12
+
+// The size in bytes of a year's key.
+const yearKeyLen = 32
+
+// A sketch's class, host and YYYYMM month.
+type sketchID struct {
+	class       class
+	host, month string
+}
 
 var errDayUnique = errors.New("kvstore: unique visitors are kept per month, not per day")
 
@@ -48,17 +61,17 @@ func uniqKey(host, ym string, cl class) []byte {
 	return append(encKey(host, ym), byte(cl))
 }
 
-// Adds a client to the batch's sketch of a host, month and class. A sketch holds no client, only bits of its hash.
-func (b *Batch) addUnique(host, ym string, cl class, client string) {
-	k := string(uniqKey(host, ym, cl))
+// Adds a client to the batch's unique visitors of a host, month and class.
+func (b *Batch) addUnique(host, month string, trafficClass class, client string) {
+	id := sketchID{trafficClass, host, month}
 
-	sk := b.u[k]
-	if sk == nil {
-		sk = newSketch()
-		b.u[k] = sk
+	clients := b.uniques[id]
+	if clients == nil {
+		clients = map[string]bool{}
+		b.uniques[id] = clients
 	}
 
-	sk.Insert([]byte(client))
+	clients[client] = true
 }
 
 // Decodes a copy of a stored blob, since bbolt owns the original. ok is false for a blob that does not decode or holds
@@ -76,31 +89,69 @@ func loadSketch(blob []byte) (sk *hyperloglog.Sketch, ok bool) {
 	return sk, true
 }
 
-// Merges the batch's sketches into the stored ones. An unreadable stored sketch is replaced by the batch's: unique
-// visitors are an estimate, and the month counts low rather than failing.
-func writeUnique(bkt *bolt.Bucket, u map[string]*hyperloglog.Sketch) error {
-	for k, sk := range u {
-		merged := sk
+// Adds the batch's clients to the stored sketches, each as an HMAC-SHA256 under the key of its sketch's year: a sketch
+// keeps bits of a hash that only the key repeats. An unreadable stored sketch is replaced by a sketch of the batch's
+// clients alone: unique visitors are an estimate, and the month counts low rather than failing.
+func writeUnique(sketches, keys *bolt.Bucket, uniques map[sketchID]map[string]bool) error {
+	macs := map[string]hash.Hash{} // by year
 
-		if stored, ok := loadSketch(bkt.Get([]byte(k))); ok {
-			if err := stored.Merge(sk); err != nil {
+	var sum [sha256.Size]byte
+
+	for id, clients := range uniques {
+		year := id.month[:4]
+
+		mac := macs[year]
+		if mac == nil {
+			key, err := yearKey(keys, year)
+			if err != nil {
 				return err
 			}
 
-			merged = stored
+			mac = hmac.New(sha256.New, key)
+			macs[year] = mac
 		}
 
-		blob, err := merged.MarshalBinary()
+		sketch := newSketch()
+
+		for client := range clients {
+			mac.Reset()
+			mac.Write([]byte(client))
+			sketch.Insert(mac.Sum(sum[:0]))
+		}
+
+		sketchKey := uniqKey(id.host, id.month, id.class)
+		if stored, ok := loadSketch(sketches.Get(sketchKey)); ok {
+			if err := stored.Merge(sketch); err != nil {
+				return err
+			}
+
+			sketch = stored
+		}
+
+		blob, err := sketch.MarshalBinary()
 		if err != nil {
 			return err
 		}
 
-		if err := bkt.Put([]byte(k), blob); err != nil {
+		if err := sketches.Put(sketchKey, blob); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// Returns the key of a year's sketches, made on the year's first page. A stored key of another size is replaced, and
+// the year may then count a client twice.
+func yearKey(keys *bolt.Bucket, year string) ([]byte, error) {
+	if key := keys.Get([]byte(year)); len(key) == yearKeyLen {
+		return key, nil
+	}
+
+	key := make([]byte, yearKeyLen)
+	_, _ = rand.Read(key) // never fails
+
+	return key, keys.Put([]byte(year), key)
 }
 
 // Unique estimates the distinct clients with a page in a class f counts on the given hosts, over a year or a month. A

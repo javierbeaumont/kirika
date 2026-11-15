@@ -344,7 +344,7 @@ func TestBandwidthCappedAcrossFlushes(t *testing.T) {
 	}
 }
 
-// A flush adds to the stored counters and empties the batch: sketches, pages for the visits and log states included.
+// A flush adds to the stored counters and empties the batch: clients, pages for the visits and log states included.
 func TestFlushAdds(t *testing.T) {
 	db := openStore(t)
 	ev := from(ip(0), page("h", "/", 200, 3, base))
@@ -358,9 +358,9 @@ func TestFlushAdds(t *testing.T) {
 			t.Fatalf("flush: %v", err)
 		}
 
-		if len(b.d) != 0 || len(b.u) != 0 || len(b.events) != 0 || len(b.state) != 0 {
-			t.Fatalf("the batch keeps %d counters, %d sketches, %d pages and %d log states after a flush", len(b.d),
-				len(b.u), len(b.events), len(b.state))
+		if len(b.d) != 0 || len(b.uniques) != 0 || len(b.events) != 0 || len(b.state) != 0 {
+			t.Fatalf("the batch keeps %d counters, clients of %d sketches, %d pages and %d log states after a flush",
+				len(b.d), len(b.uniques), len(b.events), len(b.state))
 		}
 	}
 

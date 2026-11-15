@@ -29,11 +29,11 @@ import (
 	"github.com/javierbeaumont/kirika/internal/logparse"
 )
 
-// Returns the estimate of each of the batch's sketches, by key.
-func estimates(b *Batch) map[string]uint64 {
+// Returns the number of clients the batch adds to each sketch, by key.
+func clientCounts(batch *Batch) map[string]uint64 {
 	out := map[string]uint64{}
-	for k, sk := range b.u {
-		out[k] = sk.Estimate()
+	for id, clients := range batch.uniques {
+		out[string(uniqKey(id.host, id.month, id.class))] = uint64(len(clients))
 	}
 
 	return out
@@ -58,17 +58,17 @@ func TestUnique(t *testing.T) {
 
 	human := newClass(false, groupCorrect)
 	jan, feb := base.Format("200601"), next.Format("200601")
-	want := map[string]int{
+	want := map[string]uint64{
 		string(uniqKey("h", jan, human)):     1000,
 		string(uniqKey("h", feb, human)):     1000,
 		string(uniqKey("mixed", jan, human)): 1,
 		string(uniqKey("other", jan, human)): 1000,
 	}
 
-	got := estimates(applied(evs...))
+	got := clientCounts(applied(evs...))
 	for k, n := range want {
-		if !near(got[k], n) {
-			t.Errorf("sketch %q = %d, want about %d", k, got[k], n)
+		if got[k] != n {
+			t.Errorf("sketch %q = %d, want %d", k, got[k], n)
 		}
 	}
 
@@ -100,7 +100,7 @@ func TestUniqueClasses(t *testing.T) {
 		key(true, groupCorrect):  1,
 	}
 
-	if got := estimates(b); !reflect.DeepEqual(got, want) {
+	if got := clientCounts(b); !reflect.DeepEqual(got, want) {
 		t.Errorf("sketches = %v, want %v", got, want)
 	}
 }
@@ -131,7 +131,7 @@ func TestUniqueClientForms(t *testing.T) {
 	}
 
 	key := string(uniqKey("h", base.Format("200601"), newClass(false, groupCorrect)))
-	if got := estimates(applied(evs...)); len(got) != 1 || got[key] != 3 {
+	if got := clientCounts(applied(evs...)); len(got) != 1 || got[key] != 3 {
 		t.Errorf("sketches = %v, want 3 clients under %q only", got, key)
 	}
 }

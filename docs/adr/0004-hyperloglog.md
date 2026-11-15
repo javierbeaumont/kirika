@@ -1,6 +1,6 @@
 # ADR-0004: HyperLogLog for unique visitors
 
-**Date:** 2026-11-06 **Status:** Accepted
+**Date:** 2026-11-06 **Status:** Accepted, superseded in part by [ADR-0006](0006-yearly-sketch-keys.md)
 
 ## Context
 

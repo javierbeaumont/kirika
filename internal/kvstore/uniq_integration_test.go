@@ -23,7 +23,10 @@ package kvstore
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,6 +34,11 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 )
+
+// Reports whether got is within 5% of want, three times the sketch's standard error.
+func near(got uint64, want int) bool {
+	return math.Abs(float64(got)-float64(want)) <= 0.05*float64(want)
+}
 
 func unique(t *testing.T, db *DB, host, period string, f Filter) uint64 {
 	t.Helper()
@@ -172,6 +180,92 @@ func TestSketchSparse(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("view: %v", err)
+	}
+}
+
+// Returns the stored key of a year's sketches, or nil.
+func storedYearKey(t *testing.T, db *DB, year string) []byte {
+	t.Helper()
+
+	var key []byte
+
+	err := db.b.View(func(tx *bolt.Tx) error {
+		key = bytes.Clone(tx.Bucket(bktKeys).Get([]byte(year)))
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("view: %v", err)
+	}
+
+	return key
+}
+
+// A sketch takes each client as an HMAC-SHA256 under its year's key: the library's own hash of a client adds to it as
+// another client, and the HMAC under the key adds nothing. Each year has its own key, in one flush too.
+func TestSketchKeyed(t *testing.T) {
+	db := openStore(t)
+	nextYear := base.AddDate(1, 0, 0)
+	flush(t, db, append(visits("h", 0, 1000, base), visits("h", 0, 1000, nextYear)...)...)
+
+	key, nextKey := storedYearKey(t, db, "2000"), storedYearKey(t, db, nextYear.Format("2006"))
+	if len(key) != yearKeyLen || len(nextKey) != yearKeyLen || bytes.Equal(key, nextKey) {
+		t.Fatalf("year keys %x and %x, want two different ones of %d bytes", key, nextKey, yearKeyLen)
+	}
+
+	hmacUnder := func(key []byte) func(client string) []byte {
+		return func(client string) []byte {
+			mac := hmac.New(sha256.New, key)
+			mac.Write([]byte(client))
+
+			return mac.Sum(nil)
+		}
+	}
+
+	for name, tc := range map[string]struct {
+		month time.Time
+		hash  func(client string) []byte
+		want  int
+	}{
+		"own hash":                       {base, func(client string) []byte { return []byte(client) }, 2000},
+		"HMAC under the key":             {base, hmacUnder(key), 1000},
+		"HMAC under the next year's key": {nextYear, hmacUnder(nextKey), 1000},
+	} {
+		probe := newSketch()
+		for i := range 1000 {
+			probe.Insert(tc.hash(ip(i)))
+		}
+
+		err := db.b.View(func(tx *bolt.Tx) error {
+			stored, ok := loadSketch(tx.Bucket(bktUniq).Get(uniqKey("h", tc.month.Format("200601"), humanVisits)))
+			if !ok {
+				return errors.New("no stored sketch")
+			}
+
+			if err := stored.Merge(probe); err != nil {
+				return err
+			}
+
+			if got := stored.Estimate(); !near(got, tc.want) {
+				t.Errorf("%s: the stored sketch merged with the clients' = %d, want about %d", name, got, tc.want)
+			}
+
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
+// A stored year key of another size is replaced by a new one.
+func TestYearKeyReplaced(t *testing.T) {
+	db := openStore(t)
+	putRaw(t, db, bktKeys, []byte("2000"), []byte{1})
+	flush(t, db, visits("h", 0, 10, base)...)
+
+	if key := storedYearKey(t, db, "2000"); len(key) != yearKeyLen {
+		t.Errorf("year key %x, want %d bytes", key, yearKeyLen)
 	}
 }
 

@@ -32,7 +32,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/axiomhq/hyperloglog"
 	"github.com/javierbeaumont/kirika/internal/logparse"
 	"github.com/javierbeaumont/kirika/internal/uaclass"
 	bolt "go.etcd.io/bbolt"
@@ -95,7 +94,7 @@ type Batch struct {
 	query   string              // "?", which starts a query (RFC 3986, section 3.4), and the query separators
 	state   map[string]LogState // by log path
 	timeout time.Duration
-	u       map[string]*hyperloglog.Sketch
+	uniques map[sketchID]map[string]bool // the clients of each sketch
 	valid   map[int]bool
 }
 
@@ -125,7 +124,7 @@ func (db *DB) NewBatch(o Options) *Batch {
 		query:   "?" + o.QuerySeparators,
 		state:   map[string]LogState{},
 		timeout: o.VisitTimeout,
-		u:       map[string]*hyperloglog.Sketch{},
+		uniques: map[sketchID]map[string]bool{},
 		valid:   map[int]bool{},
 	}
 
@@ -266,8 +265,8 @@ func clip(s string) string {
 	return s[:maxValueLen]
 }
 
-// Flush writes the batch in one transaction and empties it: its counters, sketches and sessions add to the stored ones,
-// and its log states replace theirs. On error nothing is written and the batch is kept.
+// Flush writes the batch in one transaction and empties it: its counters and sessions add to the stored ones, its
+// clients to the stored sketches, and its log states replace theirs. On error nothing is written and the batch is kept.
 func (db *DB) Flush(b *Batch) error {
 	if len(b.d) == 0 && len(b.state) == 0 {
 		return nil
@@ -312,14 +311,14 @@ func (db *DB) Flush(b *Batch) error {
 			return err
 		}
 
-		return writeUnique(tx.Bucket(bktUniq), b.u)
+		return writeUnique(tx.Bucket(bktUniq), tx.Bucket(bktKeys), b.uniques)
 	})
 	if err != nil {
 		return err
 	}
 
 	b.d = map[string]tally{}
-	b.u = map[string]*hyperloglog.Sketch{}
+	b.uniques = map[sketchID]map[string]bool{}
 	b.events = nil
 	b.state = map[string]LogState{}
 

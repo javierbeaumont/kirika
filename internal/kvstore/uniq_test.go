@@ -21,7 +21,6 @@ package kvstore
 
 import (
 	"fmt"
-	"math"
 	"testing"
 	"time"
 
@@ -49,11 +48,6 @@ func visits(host string, first, last int, t time.Time) []logparse.Event {
 	}
 
 	return evs
-}
-
-// Reports whether got is within 5% of want, three times the sketch's standard error.
-func near(got uint64, want int) bool {
-	return math.Abs(float64(got)-float64(want)) <= 0.05*float64(want)
 }
 
 // Returns the encoding of a sketch of n distinct IPs at precision p.
