@@ -179,8 +179,8 @@ func TestRunErrors(t *testing.T) {
 	}
 }
 
-// A read with an unreadable line logs its counts as a warning, any other that took lines at debug level, and one that
-// took none nothing.
+// A read with an unreadable line or a page of a closed year logs its counts as a warning, about the unreadable lines
+// when it has both; any other that took lines at debug level; and one that took none nothing.
 func TestRunReport(t *testing.T) {
 	logged, _ := follow(t, time.Nanosecond,
 		step{res: ingest.Result{Counted: 3, Malformed: 1}},
@@ -188,17 +188,23 @@ func TestRunReport(t *testing.T) {
 		step{res: ingest.Result{TooLong: 1}},
 		step{res: ingest.Result{BadDate: 1}},
 		step{res: ingest.Result{Blank: 4, NotAccess: 5, Dropped: 6}},
+		step{res: ingest.Result{Counted: 2}},
+		step{res: ingest.Result{Counted: 2, ClosedYearPages: 1}},
+		step{res: ingest.Result{Counted: 1, ClosedYearPages: 1, Malformed: 1}},
 		step{},
 	)
 
 	for text, want := range map[string]int{
-		`level=WARN msg="unreadable lines"`:                    4,
-		`counted=3 blank=0 not_access=0 dropped=0 malformed=1`: 1,
-		`binary=1 too_long=0`:                                  1,
-		`too_long=1 bad_date=0`:                                1,
-		`bad_date=1`:                                           1,
-		`level=DEBUG msg="lines read" counted=0 blank=4 not_access=5 dropped=6`: 1,
-		"\n": 5,
+		`level=WARN msg="unreadable lines"`:                                        5,
+		`counted=3 closed_year_pages=0 blank=0 not_access=0 dropped=0 malformed=1`: 1,
+		`binary=1 too_long=0`:                                                      1,
+		`too_long=1 bad_date=0`:                                                    1,
+		`bad_date=1`:                                                               1,
+		`level=DEBUG msg="lines read" counted=0 closed_year_pages=0 blank=4 not_access=5`: 1,
+		`dropped=6 malformed=0`: 1,
+		`level=DEBUG msg="lines read" counted=2 closed_year_pages=0`:                    1,
+		`level=WARN msg="pages of a closed year" counted=2 closed_year_pages=1 blank=0`: 1,
+		"\n": 8,
 	} {
 		if got := strings.Count(logged, text); got != want {
 			t.Errorf("%d logs of %q, want %d:\n%s", got, text, want, logged)

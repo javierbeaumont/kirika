@@ -141,6 +141,29 @@ func read(t *testing.T, r *Reader) Result {
 	return res
 }
 
+// A read tells how many of its counted lines are pages of a year the store had closed before it: none of a year it
+// closes itself, nor of the year after the last closed one.
+func TestClosedYearPages(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, gets(0, 3)+ncsa("192.0.2.1", "GET", "/", base.AddDate(1, 1, 0))+"\n")
+
+	options := DefaultOptions()
+	options.Now = func() time.Time { return base.AddDate(1, 1, 0) }
+	logReader := newReader(t, db, path, options)
+
+	if got := read(t, logReader); got != (Result{Counted: 4}) {
+		t.Errorf("Read = %+v, want 4 counted, no page of a closed year", got)
+	}
+
+	appendLog(t, path, gets(3, 3)+ncsa("192.0.2.2", "GET", "/", base.AddDate(1, 0, 0))+"\n"+
+		ncsa("192.0.2.1", "GET", "/logo.png", base)+"\n")
+
+	if got := read(t, logReader); got != (Result{Counted: 5, ClosedYearPages: 3}) {
+		t.Errorf("Read = %+v, want 5 counted, 3 pages of a closed year", got)
+	}
+}
+
 // Returns the hits of host h in 2000.
 func hits(t *testing.T, db *kvstore.DB) int64 {
 	t.Helper()

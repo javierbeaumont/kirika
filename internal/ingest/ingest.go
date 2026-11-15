@@ -71,14 +71,15 @@ func DefaultMethods() []string {
 
 // Result counts the lines of a read by what became of them.
 type Result struct {
-	Counted   int // in the store
-	Blank     int // empty or spaces only
-	NotAccess int // a message that is not an access, which Caddy writes in its log too
-	Dropped   int // a method out of Options.Methods
-	Malformed int // unreadable: the parser refused it
-	Binary    int // unreadable: it starts with a NUL byte
-	TooLong   int // unreadable: longer than 1 MiB
-	BadDate   int // unreadable: dated more than 24 hours after the read, or before the year 1000
+	Counted         int // in the store
+	ClosedYearPages int // of the counted lines, the pages of a year closed before the read: they add no unique visitor
+	Blank           int // empty or spaces only
+	NotAccess       int // a message that is not an access, which Caddy writes in its log too
+	Dropped         int // a method out of Options.Methods
+	Malformed       int // unreadable: the parser refused it
+	Binary          int // unreadable: it starts with a NUL byte
+	TooLong         int // unreadable: longer than 1 MiB
+	BadDate         int // unreadable: dated more than 24 hours after the read, or before the year 1000
 }
 
 // Unreadable returns the number of unreadable lines.
@@ -209,7 +210,7 @@ func (r *Reader) Read(ctx context.Context) (Result, error) {
 		err = progress.refused
 	case progress.read:
 		progress.batch.SetState(r.path, progress.last)
-		_, err = r.db.Flush(progress.batch)
+		progress.result.ClosedYearPages, err = r.db.Flush(progress.batch)
 	}
 
 	if err != nil {
