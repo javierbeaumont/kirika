@@ -202,19 +202,24 @@ func TestParseNCSAFixture(t *testing.T) {
 	}
 }
 
-// A user name runs to the " [" before the time, so one with a space shifts no field.
+// Whatever the spaces before the request, a user name with spaces, brackets or an escaped quote shifts no field, nor
+// does the " [" of a user agent. Apache logs an empty user name as "".
 func TestParseNCSAUserName(t *testing.T) {
-	for _, user := range []string{"-", "alice", "alice smith", "a  b/c"} {
-		line := `192.0.2.1 - ` + user + ` [01/Jan/2000:00:00:00 +0000] "GET /a HTTP/1.1" 200 1`
+	users := []string{`""`, "-", "[x]", "a  b/c", "a [b", "a [b [c", "a [b]", "alice", "alice smith", `x] \"y`}
+	for _, user := range users {
+		for _, sep := range []string{"", " ", "  "} {
+			line := `192.0.2.1 - ` + user + ` [01/Jan/2000:00:00:00 +0000]` + sep +
+				`"GET /a HTTP/1.1" 200 1 "-" "Mozilla/4.0 [en]"`
 
-		got, err := ParseNCSA([]byte(line))
-		if err != nil {
-			t.Fatalf("user %q: parse: %v", user, err)
-		}
+			got, err := ParseNCSA([]byte(line))
+			if err != nil {
+				t.Fatalf("%s: parse: %v", line, err)
+			}
 
-		if got.ClientIP != "192.0.2.1" || got.Path != "/a" || got.Status != 200 || got.Size != 1 {
-			t.Errorf("user %q: client, path, status, size = %q, %q, %d, %d; want 192.0.2.1, /a, 200, 1", user,
-				got.ClientIP, got.Path, got.Status, got.Size)
+			if got.ClientIP != "192.0.2.1" || got.Path != "/a" || got.Status != 200 || got.Size != 1 {
+				t.Errorf("%s: client, path, status, size = %q, %q, %d, %d; want 192.0.2.1, /a, 200, 1", line,
+					got.ClientIP, got.Path, got.Status, got.Size)
+			}
 		}
 	}
 }

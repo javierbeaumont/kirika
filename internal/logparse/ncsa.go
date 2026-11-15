@@ -41,7 +41,7 @@ func ParseNCSA(line []byte) (Event, error) {
 	scanner := &clfScanner{s: string(line)}
 	client := scanner.plain("client")
 	scanner.plain("ident")
-	scanner.untilBracket("authuser")
+	scanner.untilTime("authuser")
 	timestamp := scanner.bracket("time")
 
 	request, ok := scanner.quote("request")
@@ -195,8 +195,9 @@ func (sc *clfScanner) plain(field string) string {
 	return sc.s[start:sc.i]
 }
 
-// Reads a field that may hold spaces: it runs to the next " [", else to the end of the line.
-func (sc *clfScanner) untilBracket(field string) string {
+// Reads the user name, which may hold spaces and brackets: it runs to the last " [" before the time's end, else to the
+// end of the line.
+func (sc *clfScanner) untilTime(field string) string {
 	if sc.err != nil {
 		return ""
 	}
@@ -204,8 +205,10 @@ func (sc *clfScanner) untilBracket(field string) string {
 	sc.skipSpaces()
 
 	start := sc.i
-	if n := strings.Index(sc.s[start:], " ["); n >= 0 {
-		sc.i += n
+	rest := sc.s[start:]
+
+	if timeStart := strings.LastIndex(rest[:timeEnd(rest)], " ["); timeStart >= 0 {
+		sc.i += timeStart
 	} else {
 		sc.i = len(sc.s)
 	}
@@ -215,6 +218,18 @@ func (sc *clfScanner) untilBracket(field string) string {
 	}
 
 	return sc.s[start:sc.i]
+}
+
+// Returns the index in rest of the time's end, the first "]" followed, past any spaces, by a quote, or len(rest)
+// without one. A server escapes a quote in a user name, so no "]" in one is followed by a quote.
+func timeEnd(rest string) int {
+	for i := range len(rest) {
+		if rest[i] == ']' && strings.HasPrefix(strings.TrimLeft(rest[i+1:], " "), `"`) {
+			return i
+		}
+	}
+
+	return len(rest)
 }
 
 // Reads a "..." field and decodes its escapes: \xHH is the byte HH (how Apache and nginx log non-printable bytes), and
