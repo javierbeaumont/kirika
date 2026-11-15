@@ -412,13 +412,13 @@ func TestVisitsOnce(t *testing.T) {
 	b := db.NewBatch(DefaultOptions())
 	b.Apply(req("h", "192.0.2.1", "/", at(1, 10)))
 
-	if err := db.Flush(b); !errors.Is(err, errBadValue) {
+	if _, err := db.Flush(b); !errors.Is(err, errBadValue) {
 		t.Fatalf("Flush: err = %v, want errBadValue", err)
 	}
 
 	putRaw(t, db, bktAgg, key, encodeTally(tally{{0, Counts{}}}))
 
-	if err := db.Flush(b); err != nil {
+	if _, err := db.Flush(b); err != nil {
 		t.Fatalf("Flush after the repair: %v", err)
 	}
 
@@ -488,7 +488,7 @@ func TestVisitTimeout(t *testing.T) {
 	b.Apply(req("h", "192.0.2.1", "/", base))
 	b.Apply(req("h", "192.0.2.1", "/", base.Add(45*time.Minute)))
 
-	if err := db.Flush(b); err != nil {
+	if _, err := db.Flush(b); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 

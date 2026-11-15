@@ -209,7 +209,7 @@ func (r *Reader) Read(ctx context.Context) (Result, error) {
 		err = progress.refused
 	case progress.read:
 		progress.batch.SetState(r.path, progress.last)
-		err = r.db.Flush(progress.batch)
+		_, err = r.db.Flush(progress.batch)
 	}
 
 	if err != nil {

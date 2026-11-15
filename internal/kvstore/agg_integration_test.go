@@ -57,7 +57,7 @@ func flush(t *testing.T, db *DB, evs ...logparse.Event) {
 		b.Apply(ev)
 	}
 
-	if err := db.Flush(b); err != nil {
+	if _, err := db.Flush(b); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 }
@@ -354,13 +354,18 @@ func TestFlushAdds(t *testing.T) {
 	b.SetState("/a.log", LogState{Offset: 1})
 
 	for range 2 {
-		if err := db.Flush(b); err != nil {
+		if _, err := db.Flush(b); err != nil {
 			t.Fatalf("flush: %v", err)
 		}
 
 		if len(b.d) != 0 || len(b.uniques) != 0 || len(b.events) != 0 || len(b.state) != 0 {
 			t.Fatalf("the batch keeps %d counters, clients of %d sketches, %d pages and %d log states after a flush",
 				len(b.d), len(b.uniques), len(b.events), len(b.state))
+		}
+
+		if !b.newestPage.IsZero() || len(b.yearPages) != 0 {
+			t.Fatalf("the batch keeps its newest page %v and the pages of %d years after a flush", b.newestPage,
+				len(b.yearPages))
 		}
 	}
 
@@ -395,7 +400,7 @@ func TestCorruptValue(t *testing.T) {
 	b.Apply(page("bad", "/", 200, 1, base))
 	b.SetState("/a.log", LogState{Offset: 1})
 
-	if err := db.Flush(b); !errors.Is(err, errBadValue) {
+	if _, err := db.Flush(b); !errors.Is(err, errBadValue) {
 		t.Fatalf("Flush: err = %v, want errBadValue", err)
 	}
 
@@ -415,7 +420,7 @@ func TestCorruptValue(t *testing.T) {
 	putRaw(t, db, bktAgg, timeKey(tagDay, "bad", base.Format("20060102")), repaired)
 	putRaw(t, db, bktAgg, dimKey(tagURL, "bad", base.Format("200601"), "/"), repaired)
 
-	if err := db.Flush(b); err != nil {
+	if _, err := db.Flush(b); err != nil {
 		t.Fatalf("Flush after the repair: %v", err)
 	}
 

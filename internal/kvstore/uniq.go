@@ -27,6 +27,8 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"strconv"
+	"time"
 
 	"github.com/axiomhq/hyperloglog"
 	bolt "go.etcd.io/bbolt"
@@ -44,7 +46,10 @@ type sketchID struct {
 	host, month string
 }
 
-var errDayUnique = errors.New("kvstore: unique visitors are kept per month, not per day")
+var (
+	errClosedCorrupt = errors.New("kvstore: corrupt last closed year")
+	errDayUnique     = errors.New("kvstore: unique visitors are kept per month, not per day")
+)
 
 // Returns an empty sketch, sparse until it grows.
 func newSketch() *hyperloglog.Sketch {
@@ -90,19 +95,23 @@ func loadSketch(blob []byte) (sk *hyperloglog.Sketch, ok bool) {
 }
 
 // Adds the batch's clients to the stored sketches, each as an HMAC-SHA256 under the key of its sketch's year: a sketch
-// keeps bits of a hash that only the key repeats. An unreadable stored sketch is replaced by a sketch of the batch's
-// clients alone: unique visitors are an estimate, and the month counts low rather than failing.
-func writeUnique(sketches, keys *bolt.Bucket, uniques map[sketchID]map[string]bool) error {
-	macs := map[string]hash.Hash{} // by year
+// keeps bits of a hash that only the key repeats. The clients of a year up to lastClosed are left out, as a closed year
+// gets no key. An unreadable stored sketch is replaced by a sketch of the batch's clients alone: unique visitors are an
+// estimate, and the month counts low rather than failing.
+func writeUnique(sketches, keys *bolt.Bucket, uniques map[sketchID]map[string]bool, lastClosed int) error {
+	macs := map[int]hash.Hash{} // by year
 
 	var sum [sha256.Size]byte
 
 	for id, clients := range uniques {
-		year := id.month[:4]
+		year := yearOf(id.month)
+		if year <= lastClosed {
+			continue
+		}
 
 		mac := macs[year]
 		if mac == nil {
-			key, err := yearKey(keys, year)
+			key, err := yearKey(keys, strconv.Itoa(year))
 			if err != nil {
 				return err
 			}
@@ -139,6 +148,59 @@ func writeUnique(sketches, keys *bolt.Bucket, uniques map[sketchID]map[string]bo
 	}
 
 	return nil
+}
+
+// Returns the year of a YYYYMM month: all but its last two digits, as a year can have five.
+func yearOf(month string) int {
+	year, _ := strconv.Atoi(month[:len(month)-2]) // a batch's months are digits
+
+	return year
+}
+
+// Returns the last closed year, or -1 while none is: a page in the store's zone can be of the year 0.
+func lastClosedYear(meta *bolt.Bucket) (int, error) {
+	stored := meta.Get(metaClosed)
+	if stored == nil {
+		return -1, nil
+	}
+
+	year, err := strconv.Atoi(string(stored))
+	if err != nil || year < 0 {
+		return 0, fmt.Errorf("%w: %q", errClosedCorrupt, stored)
+	}
+
+	return year, nil
+}
+
+// Closes the years before the newest page's but, while that page is of January, not the one just before: the month of
+// grace lets a log read late count its clients. Their keys are deleted, as is a key with no year, and the last of these
+// years is kept as the last closed year. A batch with no page has the zero time as its newest page, which closes none.
+func closeYears(meta, keys *bolt.Bucket, newestPage time.Time, lastClosed int) error {
+	last := newestPage.Year() - 1
+	if newestPage.Month() == time.January {
+		last--
+	}
+
+	if last <= lastClosed {
+		return nil
+	}
+
+	var old [][]byte
+
+	cursor := keys.Cursor()
+	for name, _ := cursor.First(); name != nil; name, _ = cursor.Next() {
+		if year, err := strconv.Atoi(string(name)); err != nil || year <= last {
+			old = append(old, bytes.Clone(name))
+		}
+	}
+
+	for _, name := range old {
+		if err := keys.Delete(name); err != nil {
+			return err
+		}
+	}
+
+	return meta.Put(metaClosed, []byte(strconv.Itoa(last)))
 }
 
 // Returns the key of a year's sketches, made on the year's first page. A stored key of another size is replaced, and

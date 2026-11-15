@@ -86,16 +86,18 @@ func DefaultOptions() Options {
 // Batch holds in memory what applied events add and the log states set on it, until DB.Flush writes them in one
 // transaction.
 type Batch struct {
-	d       map[string]tally
-	events  []sessEvent // in log order
-	index   []string    // "/" and an index page name each
-	loc     *time.Location
-	notPage map[string]bool
-	query   string              // "?", which starts a query (RFC 3986, section 3.4), and the query separators
-	state   map[string]LogState // by log path
-	timeout time.Duration
-	uniques map[sketchID]map[string]bool // the clients of each sketch
-	valid   map[int]bool
+	d          map[string]tally
+	events     []sessEvent // in log order
+	index      []string    // "/" and an index page name each
+	loc        *time.Location
+	newestPage time.Time // in the store's zone
+	notPage    map[string]bool
+	query      string              // "?", which starts a query (RFC 3986, section 3.4), and the query separators
+	state      map[string]LogState // by log path
+	timeout    time.Duration
+	uniques    map[sketchID]map[string]bool // the clients of each sketch
+	valid      map[int]bool
+	yearPages  map[int]int // the pages of each year
 }
 
 // Host is a host with data and the YYYY-MM months, in the store's zone, of its first and last days.
@@ -118,14 +120,15 @@ func (db *DB) NewBatch(o Options) *Batch {
 	}
 
 	b := &Batch{
-		d:       map[string]tally{},
-		loc:     db.loc,
-		notPage: setOf(o.NotPages...),
-		query:   "?" + o.QuerySeparators,
-		state:   map[string]LogState{},
-		timeout: o.VisitTimeout,
-		uniques: map[sketchID]map[string]bool{},
-		valid:   map[int]bool{},
+		d:         map[string]tally{},
+		loc:       db.loc,
+		notPage:   setOf(o.NotPages...),
+		query:     "?" + o.QuerySeparators,
+		state:     map[string]LogState{},
+		timeout:   o.VisitTimeout,
+		uniques:   map[sketchID]map[string]bool{},
+		valid:     map[int]bool{},
+		yearPages: map[int]int{},
 	}
 
 	for _, name := range o.IndexPages {
@@ -184,6 +187,14 @@ func (b *Batch) Apply(event logparse.Event) {
 
 	if referrer := cutQuery(event.Referer, b.query); referrer != "" {
 		b.add(dimKey(tagRef, host, month, clip(referrer)), trafficClass, counts)
+	}
+
+	if counts.Pages == 1 {
+		b.yearPages[localTime.Year()]++
+
+		if localTime.After(b.newestPage) {
+			b.newestPage = localTime
+		}
 	}
 
 	if event.ClientIP != "" && counts.Pages == 1 {
@@ -266,13 +277,15 @@ func clip(s string) string {
 }
 
 // Flush writes the batch in one transaction and empties it: its counters and sessions add to the stored ones, its
-// clients to the stored sketches, and its log states replace theirs. On error nothing is written and the batch is kept.
-func (db *DB) Flush(b *Batch) error {
+// clients to the stored sketches, and its log states replace theirs. Its newest page then closes the years before its
+// own but, while it is of January, not the one just before. It returns how many of its pages are of a year closed
+// before the flush: they count in all but the unique visitors. On error nothing is written and the batch is kept.
+func (db *DB) Flush(b *Batch) (closedYearPages int, err error) {
 	if len(b.d) == 0 && len(b.state) == 0 {
-		return nil
+		return 0, nil
 	}
 
-	err := db.b.Update(func(tx *bolt.Tx) error {
+	err = db.b.Update(func(tx *bolt.Tx) error {
 		// The visits go to a copy, so a failed flush leaves the batch as it was.
 		d := make(map[string]tally, len(b.d))
 		for k, t := range b.d {
@@ -311,18 +324,37 @@ func (db *DB) Flush(b *Batch) error {
 			return err
 		}
 
-		return writeUnique(tx.Bucket(bktUniq), tx.Bucket(bktKeys), b.uniques)
+		meta, keys := tx.Bucket(bktMeta), tx.Bucket(bktKeys)
+
+		lastClosed, err := lastClosedYear(meta)
+		if err != nil {
+			return err
+		}
+
+		for year, pages := range b.yearPages {
+			if year <= lastClosed {
+				closedYearPages += pages
+			}
+		}
+
+		if err := writeUnique(tx.Bucket(bktUniq), keys, b.uniques, lastClosed); err != nil {
+			return err
+		}
+
+		return closeYears(meta, keys, b.newestPage, lastClosed)
 	})
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	b.d = map[string]tally{}
 	b.uniques = map[sketchID]map[string]bool{}
 	b.events = nil
+	b.newestPage = time.Time{}
 	b.state = map[string]LogState{}
+	b.yearPages = map[int]int{}
 
-	return nil
+	return closedYearPages, nil
 }
 
 // Checks a period in YYYY, YYYY-MM or YYYY-MM-DD and returns it without dashes, as key dates start.

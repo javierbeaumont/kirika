@@ -181,3 +181,12 @@ func TestLoadSketchCorrupt(t *testing.T) {
 		}
 	}
 }
+
+// A month's year is all but its last two digits, five for the year 10000.
+func TestYearOf(t *testing.T) {
+	for month, want := range map[string]int{"200001": 2000, "100012": 1000, "1000001": 10000} {
+		if got := yearOf(month); got != want {
+			t.Errorf("yearOf(%q) = %d, want %d", month, got, want)
+		}
+	}
+}

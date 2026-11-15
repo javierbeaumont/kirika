@@ -41,6 +41,7 @@ var (
 	bktSess    = []byte("sess")
 	bktState   = []byte("state")
 	bktUniq    = []byte("uniq")
+	metaClosed = []byte("closed")
 	metaSalt   = []byte("salt")
 	metaSchema = []byte("schema")
 	metaZone   = []byte("zone")

@@ -54,7 +54,7 @@ func TestState(t *testing.T) {
 	b.SetState("/a.log", LogState{Line: 2, Offset: 20, Sum: [8]byte{2}})
 	b.SetState("/b.log", LogState{Line: 3, Offset: 30, Sum: [8]byte{3}})
 
-	if err := db.Flush(b); err != nil {
+	if _, err := db.Flush(b); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 
@@ -65,7 +65,7 @@ func TestState(t *testing.T) {
 	b.Apply(page("h", "/", 200, 1, base))
 	b.SetState("/a.log", LogState{Line: 4, Offset: 40, Sum: [8]byte{4}})
 
-	if err := db.Flush(b); err != nil {
+	if _, err := db.Flush(b); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 
@@ -86,7 +86,7 @@ func TestStateNoPath(t *testing.T) {
 	b := db.NewBatch(DefaultOptions())
 	b.SetState("", LogState{Offset: 1})
 
-	if err := db.Flush(b); !errors.Is(err, berrors.ErrKeyRequired) {
+	if _, err := db.Flush(b); !errors.Is(err, berrors.ErrKeyRequired) {
 		t.Errorf("Flush: err = %v, want ErrKeyRequired", err)
 	}
 }

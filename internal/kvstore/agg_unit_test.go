@@ -518,3 +518,28 @@ func TestMonths(t *testing.T) {
 		}
 	}
 }
+
+// A batch keeps its newest page and the pages of each year, both in the store's zone. A hit that is no page adds to
+// neither.
+func TestNewestPage(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	newYear := base.AddDate(1, 0, 0).Add(-5 * time.Hour) // a new year in Kolkata, still the old one in UTC
+	february := newYear.AddDate(0, 1, 0)                 // February in Kolkata, January in UTC
+
+	b := batchIn(loc, DefaultOptions())
+	b.Apply(page("h", "/", 200, 1, february))
+	b.Apply(page("h", "/", 200, 1, newYear))
+	b.Apply(page("h", "/logo.png", 200, 1, february.AddDate(1, 0, 0)))
+
+	if !b.newestPage.Equal(february) || b.newestPage.Month() != time.February {
+		t.Errorf("newest page %v, want %v in the store's zone", b.newestPage, february.In(loc))
+	}
+
+	if want := map[int]int{newYear.In(loc).Year(): 2}; !reflect.DeepEqual(b.yearPages, want) {
+		t.Errorf("pages by year %v, want %v", b.yearPages, want)
+	}
+}
