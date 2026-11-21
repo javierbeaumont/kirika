@@ -19,5 +19,15 @@
 
 package kvstore
 
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+)
+
 // The class of a human's visits.
 var humanVisits = newClass(false, groupCorrect)
+
+// Returns the ID of a client's session under salt.
+func idUnder(salt []byte, host, client string, visitClass class) []byte {
+	return sessionID(hmac.New(sha256.New, salt), host, client, visitClass)
+}

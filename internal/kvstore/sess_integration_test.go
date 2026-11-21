@@ -168,6 +168,18 @@ func TestEntryKind(t *testing.T) {
 	}
 }
 
+// A stored session whose visits all end in the flush that adds a page to it is deleted.
+func TestTouchedSessionEnds(t *testing.T) {
+	db := openStore(t)
+	t0 := at(1, 10)
+	flush(t, db, req("h", "192.0.2.1", "/a", t0))
+	flush(t, db, req("h", "192.0.2.1", "/b", t0.Add(10*time.Minute)), req("h", "192.0.2.2", "/", t0.Add(2*time.Hour)))
+
+	if got := sessionCount(t, db); got != 1 {
+		t.Errorf("%d sessions, want 1", got)
+	}
+}
+
 // A session carries over between batches, by the log's time: these requests are years older than the clock.
 func TestVisitAcrossFlushes(t *testing.T) {
 	db := openStore(t)
@@ -446,8 +458,8 @@ func TestUnreadableSession(t *testing.T) {
 
 	for name, value := range map[string][]byte{"another format": {0}, "a time out of range": farPast} {
 		db := openStore(t)
-		putRaw(t, db, bktSess, sessionID(db.salt, "h", "192.0.2.1", humanVisits), value)
-		putRaw(t, db, bktSess, sessionID(db.salt, "h", "192.0.2.9", humanVisits), value)
+		putRaw(t, db, bktSess, idUnder(db.salt, "h", "192.0.2.1", humanVisits), value)
+		putRaw(t, db, bktSess, idUnder(db.salt, "h", "192.0.2.9", humanVisits), value)
 		flush(t, db, req("h", "192.0.2.1", "/", at(1, 10)))
 
 		if got := totals(t, db, "h", "2000-01", Filter{}).Visits; got != 1 {

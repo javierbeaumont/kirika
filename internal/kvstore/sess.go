@@ -27,7 +27,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
+	"maps"
 	"math"
+	"slices"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -100,13 +103,13 @@ func (db *DB) loadSalt(meta *bolt.Bucket) error {
 	return nil
 }
 
-// Returns the key of a client's session: an HMAC of its host, the client and the class of its visits under the salt,
-// cut to 16 bytes. A plain hash of an IPv4 address falls to trying them all.
-func sessionID(salt []byte, host, client string, cl class) []byte {
-	m := hmac.New(sha256.New, salt)
-	m.Write(encKey(host, client, string([]byte{byte(cl)})))
+// Returns the key of a client's session: mac of its host, the client and the class of its visits, cut to 16 bytes. mac
+// is an HMAC-SHA256 under the store's salt, reset first. A plain hash of an IPv4 address falls to trying them all.
+func sessionID(mac hash.Hash, host, client string, visitClass class) []byte {
+	mac.Reset()
+	mac.Write(encKey(host, client, string([]byte{byte(visitClass)})))
 
-	return m.Sum(nil)[:16]
+	return mac.Sum(nil)[:16]
 }
 
 // Writes a session as its format version, its class and its host, then each visit's last time as a varint and its exit;
@@ -187,9 +190,10 @@ func sessions(bucket *bolt.Bucket, salt []byte, batch *Batch, tallies map[string
 
 	touched := map[string]*session{} // by session ID
 	newest := newestPages{all: math.MinInt64, byHost: map[string]int64{}}
+	mac := hmac.New(sha256.New, salt)
 
 	for _, event := range batch.events {
-		id := string(sessionID(salt, event.host, event.client, event.class))
+		id := string(sessionID(mac, event.host, event.client, event.class))
 
 		clientSession, found := touched[id]
 		if !found {
@@ -206,13 +210,24 @@ func sessions(bucket *bolt.Bucket, salt []byte, batch *Batch, tallies map[string
 		newest.add(event.host, event.t.Unix())
 	}
 
-	for id, clientSession := range touched {
+	// The untouched sessions go first, while their nodes hold no more than a page: bbolt shifts a node's tail on each
+	// delete.
+	if err := endVisitsOf(bucket, touched, newest, batch, tallies); err != nil {
+		return err
+	}
+
+	// In key order, each new key goes after those the batch put in its node, so bbolt shifts only the node's stored
+	// keys: in any other, it shifts the batch's too, at a cost that grows with the square of the sessions.
+	for _, id := range slices.Sorted(maps.Keys(touched)) {
+		clientSession := touched[id]
+		endVisits(clientSession, newest, batch, tallies)
+
 		if err := storeSession(bucket, []byte(id), *clientSession); err != nil {
 			return err
 		}
 	}
 
-	return endVisitsOf(bucket, newest, batch, tallies)
+	return nil
 }
 
 // Adds a page to its client's session: to the open visit whose latest page is nearest, if no more than the timeout
@@ -288,22 +303,33 @@ func endVisits(clientSession *session, newest newestPages, batch *Batch, tallies
 	return ended
 }
 
-// Ends the visits of the stored sessions as endVisits does, and deletes the unreadable ones.
-func endVisitsOf(bucket *bolt.Bucket, newest newestPages, batch *Batch, tallies map[string]tally) error {
-	changed := map[string]session{} // by session ID; an unreadable one has no visit
+// Ends the visits of the stored sessions not in touched as endVisits does, and deletes the unreadable ones.
+func endVisitsOf(bucket *bolt.Bucket, touched map[string]*session, newest newestPages, batch *Batch,
+	tallies map[string]tally,
+) error {
+	type change struct {
+		id     []byte
+		stored session // an unreadable one has no visit
+	}
+
+	var changes []change // in key order, as the cursor reads them
 
 	cursor := bucket.Cursor()
 	for id, value := cursor.First(); id != nil; id, value = cursor.Next() {
+		if _, inBatch := touched[string(id)]; inBatch {
+			continue
+		}
+
 		stored, ok := decodeSession(value)
 		if ok && endVisits(&stored, newest, batch, tallies) == 0 {
 			continue
 		}
 
-		changed[string(id)] = stored
+		changes = append(changes, change{bytes.Clone(id), stored})
 	}
 
-	for id, stored := range changed {
-		if err := storeSession(bucket, []byte(id), stored); err != nil {
+	for _, pending := range changes {
+		if err := storeSession(bucket, pending.id, pending.stored); err != nil {
 			return err
 		}
 	}

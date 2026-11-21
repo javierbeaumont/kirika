@@ -23,27 +23,37 @@ package kvstore
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"reflect"
 	"slices"
 	"testing"
 	"time"
 )
 
-// A session ID is 16 bytes, the same for the same salt, host, client and class, and another when any of them changes.
+// A session ID is 16 bytes, the same for the same salt, host, client and class, and another when any of them changes. A
+// reused HMAC gives the same ID.
 func TestSessionID(t *testing.T) {
 	salt := bytes.Repeat([]byte{1}, saltLen)
 
-	id := sessionID(salt, "h", "c", humanVisits)
-	if len(id) != 16 || !bytes.Equal(sessionID(salt, "h", "c", humanVisits), id) {
+	id := idUnder(salt, "h", "c", humanVisits)
+	if len(id) != 16 || !bytes.Equal(idUnder(salt, "h", "c", humanVisits), id) {
 		t.Fatalf("sessionID = %x, want 16 bytes, the same each time", id)
 	}
 
+	mac := hmac.New(sha256.New, salt)
+	sessionID(mac, "g", "d", humanVisits)
+
+	if reused := sessionID(mac, "h", "c", humanVisits); !bytes.Equal(reused, id) {
+		t.Errorf("sessionID with a reused HMAC = %x, want %x", reused, id)
+	}
+
 	for name, other := range map[string][]byte{
-		"salt":        sessionID(bytes.Repeat([]byte{2}, saltLen), "h", "c", humanVisits),
-		"host":        sessionID(salt, "g", "c", humanVisits),
-		"client":      sessionID(salt, "h", "d", humanVisits),
-		"class":       sessionID(salt, "h", "c", newClass(true, groupCorrect)),
-		"split parts": sessionID(salt, "hc", "", humanVisits),
+		"salt":   idUnder(bytes.Repeat([]byte{2}, saltLen), "h", "c", humanVisits),
+		"host":   idUnder(salt, "g", "c", humanVisits),
+		"client": idUnder(salt, "h", "d", humanVisits),
+		"class":  idUnder(salt, "h", "c", newClass(true, groupCorrect)),
+		"split":  idUnder(salt, "hc", "", humanVisits),
 	} {
 		if bytes.Equal(other, id) {
 			t.Errorf("another %s gives the same ID", name)
