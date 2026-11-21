@@ -282,8 +282,8 @@ func timeEnd(rest string) int {
 }
 
 // Reads a "..." field and decodes its escapes: \xHH is the byte HH (how Apache and nginx log non-printable bytes), and
-// a backslash before any other byte yields that byte. quoted is false on an error or when no quoted field follows (a
-// Common-format line has no referer/user-agent).
+// unescape decodes any other. quoted is false on an error or when no quoted field follows (a Common-format line has no
+// referer/user-agent).
 func (sc *clfScanner) quote(field string) (value string, quoted bool) {
 	if sc.err != nil {
 		return "", false
@@ -307,7 +307,7 @@ func (sc *clfScanner) quote(field string) (value string, quoted bool) {
 
 			sc.i += 4
 		case char == '\\' && sc.i+1 < len(sc.s):
-			decoded.WriteByte(sc.s[sc.i+1])
+			decoded.WriteByte(unescape(sc.s[sc.i+1]))
 			sc.i += 2
 		case char == '"':
 			sc.i++
@@ -322,6 +322,29 @@ func (sc *clfScanner) quote(field string) (value string, quoted bool) {
 	sc.fail(field, "has no closing quote")
 
 	return "", false
+}
+
+// Returns the byte a backslash before char stands for: the control character of a C escape, as Apache, lighttpd or
+// nginx's escape=json writes one, or else char.
+func unescape(char byte) byte {
+	switch char {
+	case 'a':
+		return '\a'
+	case 'b':
+		return '\b'
+	case 'f':
+		return '\f'
+	case 'n':
+		return '\n'
+	case 'r':
+		return '\r'
+	case 't':
+		return '\t'
+	case 'v':
+		return '\v'
+	default:
+		return char
+	}
 }
 
 func isHex(c byte) bool {

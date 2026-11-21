@@ -312,6 +312,8 @@ func TestParseNCSAEscapes(t *testing.T) {
 		{`\xZZ`, "xZZ"},
 		{`end\x4`, "endx4"},
 		{`C:\\dev`, `C:\dev`},
+		{`\a\b\f\n\r\t\v`, "\a\b\f\n\r\t\v"},
+		{`\\ \" \q \\n`, `\ " q \n`},
 	} {
 		line := `1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1 "-" "` + tc.field + `"`
 
