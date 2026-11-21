@@ -345,16 +345,25 @@ func (sc *clfScanner) skipSpaces() {
 	}
 }
 
-// Splits a request line ("GET /path HTTP/1.1") into its method and target, each empty when missing.
-func splitRequest(request string) (method, target string) {
-	fields := strings.Fields(request)
-	if len(fields) > 0 {
-		method = fields[0]
-	}
+// The whitespace that RFC 9112, section 3, lets a recipient treat as a request line's separator: a space, a tab, a
+// vertical tab, a form feed or a carriage return.
+const requestSpace = " \t\v\f\r"
 
-	if len(fields) > 1 {
-		target = fields[1]
-	}
+// Splits a request line ("GET /path HTTP/1.1") at runs of requestSpace into its method and target, each empty when
+// missing.
+func splitRequest(request string) (method, target string) {
+	method, rest := cutWord(request)
+	target, _ = cutWord(rest)
 
 	return method, target
+}
+
+// Returns the first word of text, without the requestSpace before it, and what follows it.
+func cutWord(text string) (word, rest string) {
+	text = strings.TrimLeft(text, requestSpace)
+	if end := strings.IndexAny(text, requestSpace); end >= 0 {
+		return text[:end], text[end:]
+	}
+
+	return text, ""
 }

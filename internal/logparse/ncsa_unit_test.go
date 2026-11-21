@@ -23,7 +23,6 @@ package logparse
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -253,16 +252,25 @@ func TestParseNCSARequestLine(t *testing.T) {
 		{"GET", "GET", ""},
 		{"GET /", "GET", "/"},
 		{"GET /a?b HTTP/1.1", "GET", "/a"},
+		{`GET /a\x0Ab HTTP/1.1`, "GET", "/a\nb"},
+		{`GET /a\xC2\x85b HTTP/1.1`, "GET", "/a\u0085b"},
+		{`GET /a\xC2\xA0b HTTP/1.1`, "GET", "/a\u00a0b"},
+		{`GET\x09/a HTTP/1.1`, "GET", "/a"},
+		{`GET\x0B/a HTTP/1.1`, "GET", "/a"},
+		{`GET\x0C/a HTTP/1.1`, "GET", "/a"},
+		{`GET\x0D/a HTTP/1.1`, "GET", "/a"},
+		{`GET\x20/a HTTP/1.1`, "GET", "/a"},
+		{`GET\xC2\xA0/a HTTP/1.1`, "GET\u00a0/a", "HTTP/1.1"},
 	} {
-		line := fmt.Sprintf(`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] %q 200 1`, tc.request)
+		line := `1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "` + tc.request + `" 200 1`
 
 		got, err := ParseNCSA([]byte(line))
 		if err != nil {
-			t.Fatalf("request %q: parse: %v", tc.request, err)
+			t.Fatalf("request %#q: parse: %v", tc.request, err)
 		}
 
 		if got.Method != tc.method || got.Path != tc.path {
-			t.Errorf("request %q: method/path = %q/%q, want %q/%q", tc.request, got.Method, got.Path, tc.method,
+			t.Errorf("request %#q: method/path = %q/%q, want %q/%q", tc.request, got.Method, got.Path, tc.method,
 				tc.path)
 		}
 	}
