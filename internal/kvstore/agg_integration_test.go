@@ -213,7 +213,12 @@ func TestFilters(t *testing.T) {
 	for _, tc := range []struct {
 		f    Filter
 		want []string
-	}{{Filter{}, []string{day1}}, {bots, []string{day2}}, {all, []string{day1, day2}}} {
+	}{
+		{Filter{}, []string{day1}},
+		{bots, []string{day2}},
+		{all, []string{day1, day2}},
+		{Filter{Audience: AllAudiences, Kind: PageKind, Status: AllStatuses}, []string{day1}},
+	} {
 		var got []string
 		for _, p := range series(t, db, "h", tagDay, "2000", tc.f) {
 			got = append(got, p.At)
@@ -227,10 +232,44 @@ func TestFilters(t *testing.T) {
 	for _, tc := range []struct {
 		f    Filter
 		want int
-	}{{Filter{}, 2}, {Filter{Kind: FileKind}, 2}, {bots, 1}, {all, 3}} {
+	}{{Filter{}, 2}, {Filter{Kind: PageKind}, 1}, {Filter{Kind: FileKind}, 1}, {bots, 1}, {all, 3}} {
 		if got := dim(t, db, "h", tagURL, "2000", tc.f); len(got) != tc.want {
 			t.Errorf("Dim(%+v) = %+v, want %d values", tc.f, got, tc.want)
 		}
+	}
+}
+
+// A request that counts nothing, as a 206 past byte 0 with no body, lists no value, bucket or host.
+func TestNothingCounted(t *testing.T) {
+	db := openStore(t)
+	flush(t, db, page("h", "/v.mp4", 206, 0, at(1, 0)))
+
+	if got, err := db.Hosts(); err != nil || len(got) != 0 {
+		t.Errorf("Hosts = %+v, %v; want none", got, err)
+	}
+
+	if got := dim(t, db, "h", tagURL, "2000", Filter{}); len(got) != 0 {
+		t.Errorf("Dim = %+v, want no value", got)
+	}
+
+	if got := series(t, db, "h", tagDay, "2000", Filter{}); len(got) != 0 {
+		t.Errorf("Series = %+v, want no bucket", got)
+	}
+}
+
+// A request that counts only its bytes, as a 206 past byte 0, lists its value and bucket.
+func TestBytesOnly(t *testing.T) {
+	db := openStore(t)
+	flush(t, db, page("h", "/v.mp4", 206, 5, at(1, 0)))
+
+	want := map[string]Counts{"/v.mp4": {HitBandwidth: 5}}
+	if got := dim(t, db, "h", tagURL, "2000", Filter{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("Dim = %+v, want %+v", got, want)
+	}
+
+	wantDays := []TimePoint{{at(1, 0).Format("20060102"), Counts{HitBandwidth: 5}}}
+	if got := series(t, db, "h", tagDay, "2000", Filter{}); !reflect.DeepEqual(got, wantDays) {
+		t.Errorf("Series = %+v, want %+v", got, wantDays)
 	}
 }
 

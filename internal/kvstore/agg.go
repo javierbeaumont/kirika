@@ -143,11 +143,11 @@ func (db *DB) NewBatch(o Options) *Batch {
 }
 
 // Apply counts one event in its class: in its hour, its day and each dimension of hostKey(event.Host). It adds a hit, a
-// page if the path is one, and its size as bandwidth. A 206 that does not start at byte 0 adds its size but no hit. A
-// path and a referrer count without their fragment and query, and an index page under its directory. A page also adds
-// clientKey(event.ClientIP) to its month's unique visitors, and a correct one to the client's visits. A missing status,
-// referrer or client adds nothing there. The client kind is uaclass.Bot when the path asks for robots.txt, else Unknown
-// when the log carries no User-Agent.
+// page if the path is one, and its size as bandwidth. A 206 that does not start at byte 0 adds its size but no hit, and
+// nothing when it has no body. A path and a referrer count without their fragment and query, and an index page under
+// its directory. A page also adds clientKey(event.ClientIP) to its month's unique visitors, and a correct one to the
+// client's visits. A missing status, referrer or client adds nothing there. The client kind is uaclass.Bot when the
+// path asks for robots.txt, else Unknown when the log carries no User-Agent.
 func (b *Batch) Apply(event logparse.Event) {
 	host := hostKey(event.Host)
 	path := cutAt(event.Path, b.cut)
@@ -166,6 +166,10 @@ func (b *Batch) Apply(event logparse.Event) {
 	counts := Counts{HitBandwidth: event.Size}
 	if event.Status != http.StatusPartialContent || event.FirstPart {
 		counts.Hits = 1
+	}
+
+	if counts == (Counts{}) {
+		return
 	}
 
 	if isPage(path, b.notPage) {
@@ -384,8 +388,8 @@ func months(date string) []string {
 	return out
 }
 
-// Calls yield with the rest and the counters of each agg key that starts with one of prefixes and holds a class counted
-// by filter, all in one read transaction. The rest is valid only inside yield.
+// Calls yield with the rest and the counters of each agg key that starts with one of prefixes and counts something
+// under filter, all in one read transaction. The rest is valid only inside yield.
 func (db *DB) scan(filter Filter, yield func(rest []byte, counts Counts), prefixes ...[]byte) error {
 	return db.b.View(func(tx *bolt.Tx) error {
 		cur := tx.Bucket(bktAgg).Cursor()
@@ -397,7 +401,7 @@ func (db *DB) scan(filter Filter, yield func(rest []byte, counts Counts), prefix
 					return err
 				}
 
-				if counts, ok := filter.sum(stored); ok {
+				if counts := filter.sum(stored); counts != (Counts{}) {
 					yield(key[len(prefix):], counts)
 				}
 			}
@@ -421,8 +425,8 @@ func (db *DB) Totals(host, period string, f Filter) (Counts, error) {
 	return sum, err
 }
 
-// Series returns a host's tagHour or tagDay series over a period, in date order. A bucket with no class f counts is
-// left out.
+// Series returns a host's tagHour or tagDay series over a period, in date order. A bucket that counts nothing under f
+// is left out.
 func (db *DB) Series(host, tag, period string, f Filter) ([]TimePoint, error) {
 	date, err := checked(period, f)
 	if err != nil {
@@ -439,7 +443,8 @@ func (db *DB) Series(host, tag, period string, f Filter) ([]TimePoint, error) {
 }
 
 // Dim returns a host's counters per value of a dimension tag over a period. Dimensions are kept per month, so a day
-// reads its whole month. A flush shows in all months of a year or in none. A value with no class f counts is left out.
+// reads its whole month. A flush shows in all months of a year or in none. A value that counts nothing under f is left
+// out.
 func (db *DB) Dim(host, tag, period string, f Filter) (map[string]Counts, error) {
 	date, err := checked(period, f)
 	if err != nil {

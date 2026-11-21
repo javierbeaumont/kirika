@@ -114,23 +114,22 @@ func (f Filter) has(c class) bool {
 	}
 }
 
-// Adds up the classes of t the filter counts and keeps the part of its kind, visits being part of pages. ok is false
-// when it counts none.
-func (f Filter) sum(t tally) (c Counts, ok bool) {
-	for _, e := range t {
-		if f.has(e.class) {
-			c.add(e.Counts)
+// Adds up the classes of counters the filter counts and keeps the part of its kind, visits being part of pages.
+func (f Filter) sum(counters tally) Counts {
+	var counts Counts
 
-			ok = true
+	for _, e := range counters {
+		if f.has(e.class) {
+			counts.add(e.Counts)
 		}
 	}
 
 	switch f.Kind {
 	case PageKind:
-		c.HitBandwidth, c.Hits = c.PageBandwidth, c.Pages
+		counts.HitBandwidth, counts.Hits = counts.PageBandwidth, counts.Pages
 	case FileKind:
-		c = Counts{HitBandwidth: c.HitBandwidth - c.PageBandwidth, Hits: c.Hits - c.Pages}
+		counts = Counts{HitBandwidth: counts.HitBandwidth - counts.PageBandwidth, Hits: counts.Hits - counts.Pages}
 	}
 
-	return c, ok
+	return counts
 }

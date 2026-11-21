@@ -51,15 +51,15 @@ func applied(evs ...logparse.Event) *Batch {
 	return b
 }
 
-// Returns the counters of each key of the batch that starts with prefix and holds a class f counts, by the rest of the
-// key.
+// Returns the counters of each key of the batch that starts with prefix and counts something under f, by the rest of
+// the key.
 func counted(b *Batch, prefix []byte, f Filter) map[string]Counts {
 	out := map[string]Counts{}
 
 	for k, t := range b.d {
 		rest, found := strings.CutPrefix(k, string(prefix))
-		if c, ok := f.sum(t); found && ok {
-			out[rest] = c
+		if counts := f.sum(t); found && counts != (Counts{}) {
+			out[rest] = counts
 		}
 	}
 
@@ -215,6 +215,13 @@ func TestPartialContent(t *testing.T) {
 	want := map[string]Counts{base.Format("20060102"): {HitBandwidth: 185, Hits: 2, PageBandwidth: 30}}
 	if got := counted(b, encKey(tagDay, "h"), Filter{}); !reflect.DeepEqual(got, want) {
 		t.Errorf("days = %+v, want %+v", got, want)
+	}
+}
+
+// A 206 past byte 0 with no body leaves no key in the batch.
+func TestNothingApplied(t *testing.T) {
+	if b := applied(page("h", "/v.mp4", 206, 0, base)); len(b.d) != 0 {
+		t.Errorf("keys = %v, want none", b.d)
 	}
 }
 

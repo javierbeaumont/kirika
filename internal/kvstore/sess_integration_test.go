@@ -156,6 +156,18 @@ func TestVisitZone(t *testing.T) {
 	}
 }
 
+// An entry page counts under the page kind and not the file kind.
+func TestEntryKind(t *testing.T) {
+	db := openStore(t)
+	flush(t, db, req("h", "192.0.2.1", "/a", at(1, 10)))
+
+	for filter, want := range map[Filter]int{{Kind: PageKind}: 1, {Kind: FileKind}: 0} {
+		if got := dim(t, db, "h", tagEntry, "2000-01", filter); len(got) != want {
+			t.Errorf("entry pages under %+v = %+v, want %d", filter, got, want)
+		}
+	}
+}
+
 // A session carries over between batches, by the log's time: these requests are years older than the clock.
 func TestVisitAcrossFlushes(t *testing.T) {
 	db := openStore(t)

@@ -89,22 +89,20 @@ func TestFilterSum(t *testing.T) {
 	for _, tc := range []struct {
 		f    Filter
 		want Counts
-		ok   bool
 	}{
-		{Filter{}, Counts{HitBandwidth: 100, Hits: 10, PageBandwidth: 60, Pages: 4, Visits: 3}, true},
-		{Filter{Kind: PageKind}, Counts{HitBandwidth: 60, Hits: 4, PageBandwidth: 60, Pages: 4, Visits: 3}, true},
-		{Filter{Kind: FileKind}, Counts{HitBandwidth: 40, Hits: 6}, true},
-		{Filter{Audience: Bots}, Counts{HitBandwidth: 50, Hits: 5, PageBandwidth: 20, Pages: 2, Visits: 1}, true},
-		{Filter{Status: Errors}, Counts{HitBandwidth: 7, Hits: 1, PageBandwidth: 7, Pages: 1}, true},
+		{Filter{}, Counts{HitBandwidth: 100, Hits: 10, PageBandwidth: 60, Pages: 4, Visits: 3}},
+		{Filter{Kind: PageKind}, Counts{HitBandwidth: 60, Hits: 4, PageBandwidth: 60, Pages: 4, Visits: 3}},
+		{Filter{Kind: FileKind}, Counts{HitBandwidth: 40, Hits: 6}},
+		{Filter{Audience: Bots}, Counts{HitBandwidth: 50, Hits: 5, PageBandwidth: 20, Pages: 2, Visits: 1}},
+		{Filter{Status: Errors}, Counts{HitBandwidth: 7, Hits: 1, PageBandwidth: 7, Pages: 1}},
 		{
 			Filter{Audience: AllAudiences, Status: AllStatuses},
 			Counts{HitBandwidth: 157, Hits: 16, PageBandwidth: 87, Pages: 7, Visits: 4},
-			true,
 		},
-		{Filter{Audience: Bots, Status: Errors}, Counts{}, false},
+		{Filter{Audience: Bots, Status: Errors}, Counts{}},
 	} {
-		if got, ok := tc.f.sum(tl); got != tc.want || ok != tc.ok {
-			t.Errorf("%+v: sum = %+v, %v; want %+v, %v", tc.f, got, ok, tc.want, tc.ok)
+		if got := tc.f.sum(tl); got != tc.want {
+			t.Errorf("%+v: sum = %+v, want %+v", tc.f, got, tc.want)
 		}
 	}
 }
