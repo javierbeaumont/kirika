@@ -204,27 +204,31 @@ func TestResultAdd(t *testing.T) {
 	}
 }
 
-// New refuses a visit timeout that is not positive, a nil parser, an empty method list and a method that is empty or
-// not in upper case.
+// New refuses counting rules that kvstore.Options.Check refuses, a nil parser, an empty method list and a method that
+// is empty or not in upper case.
 func TestNewRefuses(t *testing.T) {
+	count := kvstore.DefaultOptions()
+	noCodes, shortTimeout := count, count
+	noCodes.ValidCodes, shortTimeout.VisitTimeout = nil, time.Second-time.Millisecond
+
 	for _, tc := range []struct {
-		timeout time.Duration
+		count   kvstore.Options
 		parse   logparse.Parser
 		methods []string
 		want    string
 	}{
-		{0, logparse.ParseNCSA, []string{"GET"}, "ingest: visit timeout 0s is not positive"},
-		{-time.Second, logparse.ParseNCSA, []string{"GET"}, "ingest: visit timeout -1s is not positive"},
-		{time.Hour, nil, []string{"GET"}, "ingest: no parser"},
-		{time.Hour, logparse.ParseNCSA, nil, "ingest: no method to count"},
-		{time.Hour, logparse.ParseNCSA, []string{}, "ingest: no method to count"},
-		{time.Hour, logparse.ParseNCSA, []string{"GET", "get"}, `ingest: method "get" is empty or not in upper case`},
-		{time.Hour, logparse.ParseNCSA, []string{"Get"}, `ingest: method "Get" is empty or not in upper case`},
-		{time.Hour, logparse.ParseNCSA, []string{""}, `ingest: method "" is empty or not in upper case`},
-		{time.Hour, logparse.ParseNCSA, []string{"GET", "M-SEARCH"}, ""},
+		{noCodes, logparse.ParseNCSA, []string{"GET"}, "kvstore: no valid status code"},
+		{shortTimeout, logparse.ParseNCSA, []string{"GET"}, "kvstore: visit timeout 999ms is under a second"},
+		{count, nil, []string{"GET"}, "ingest: no parser"},
+		{count, logparse.ParseNCSA, nil, "ingest: no method to count"},
+		{count, logparse.ParseNCSA, []string{}, "ingest: no method to count"},
+		{count, logparse.ParseNCSA, []string{"GET", "get"}, `ingest: method "get" is empty or not in upper case`},
+		{count, logparse.ParseNCSA, []string{"Get"}, `ingest: method "Get" is empty or not in upper case`},
+		{count, logparse.ParseNCSA, []string{""}, `ingest: method "" is empty or not in upper case`},
+		{count, logparse.ParseNCSA, []string{"GET", "M-SEARCH"}, ""},
 	} {
 		o := DefaultOptions()
-		o.Count.VisitTimeout, o.Methods = tc.timeout, tc.methods
+		o.Count, o.Methods = tc.count, tc.methods
 
 		r, err := New(nil, "access.log", tc.parse, o)
 
@@ -234,8 +238,8 @@ func TestNewRefuses(t *testing.T) {
 		}
 
 		if got != tc.want || (err == nil) != (r != nil) {
-			t.Errorf("New with timeout %v, parser %v, methods %q: %v; want %q", tc.timeout, tc.parse != nil, tc.methods,
-				err, tc.want)
+			t.Errorf("New with codes %v, timeout %v, parser %v, methods %q: %v; want %q", tc.count.ValidCodes,
+				tc.count.VisitTimeout, tc.parse != nil, tc.methods, err, tc.want)
 		}
 	}
 }

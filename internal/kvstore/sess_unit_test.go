@@ -237,17 +237,3 @@ func TestEndVisit(t *testing.T) {
 		t.Errorf("exits = %+v, want %+v", tallies, want)
 	}
 }
-
-func TestNewBatchTimeout(t *testing.T) {
-	for _, d := range []time.Duration{0, -time.Second} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("NewBatch with a visit timeout of %v did not panic", d)
-				}
-			}()
-
-			batchIn(time.UTC, Options{VisitTimeout: d})
-		}()
-	}
-}

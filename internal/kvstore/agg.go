@@ -112,11 +112,36 @@ type TimePoint struct {
 	Counts
 }
 
-// NewBatch returns an empty batch that counts by the rules of o, in the store's time zone. It panics if o.VisitTimeout
-// is not positive.
+// Check returns why NewBatch refuses o, if it does: no valid code, which leaves the default view empty; a valid code
+// outside 100-999, which no status code matches, while 0 makes a line with no status correct; a visit timeout under a
+// second, which acts as 0, as a session keeps whole seconds; or one over abandonedAfter, which would let how the log is
+// split into batches decide whether a visit ends.
+func (o Options) Check() error {
+	if len(o.ValidCodes) == 0 {
+		return errors.New("kvstore: no valid status code")
+	}
+
+	for _, code := range o.ValidCodes {
+		if code < 100 || code > 999 {
+			return fmt.Errorf("kvstore: valid status code %d is outside 100-999", code)
+		}
+	}
+
+	switch {
+	case o.VisitTimeout < time.Second:
+		return fmt.Errorf("kvstore: visit timeout %v is under a second", o.VisitTimeout)
+	case o.VisitTimeout > abandonedAfter:
+		return fmt.Errorf("kvstore: visit timeout %v is over %d days", o.VisitTimeout, abandonedAfter/(24*time.Hour))
+	}
+
+	return nil
+}
+
+// NewBatch returns an empty batch that counts by the rules of o, in the store's time zone. It panics if o.Check refuses
+// o.
 func (db *DB) NewBatch(o Options) *Batch {
-	if o.VisitTimeout <= 0 {
-		panic(fmt.Sprintf("kvstore: visit timeout %v is not positive", o.VisitTimeout))
+	if err := o.Check(); err != nil {
+		panic(err.Error())
 	}
 
 	b := &Batch{

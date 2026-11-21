@@ -101,8 +101,8 @@ type Reader struct {
 }
 
 // New returns a reader of the log at path that parses its lines with parse and counts them into db by the rules of
-// options. It refuses a visit timeout that is not positive, a nil parser, an empty method list and a method that is
-// empty or not in upper case.
+// options. It refuses counting rules that kvstore.Options.Check refuses, a nil parser, an empty method list and a
+// method that is empty or not in upper case.
 func New(db *kvstore.DB, path string, parse logparse.Parser, options Options) (*Reader, error) {
 	if err := options.check(parse); err != nil {
 		return nil, err
@@ -155,9 +155,11 @@ func withoutUserAgent(parse logparse.Parser) logparse.Parser {
 
 // Returns why New refuses o or parse, if it does.
 func (o Options) check(parse logparse.Parser) error {
+	if err := o.Count.Check(); err != nil {
+		return err
+	}
+
 	switch {
-	case o.Count.VisitTimeout <= 0:
-		return fmt.Errorf("ingest: visit timeout %v is not positive", o.Count.VisitTimeout)
 	case parse == nil:
 		return errors.New("ingest: no parser")
 	case len(o.Methods) == 0:

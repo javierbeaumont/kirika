@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"strconv"
@@ -294,6 +295,55 @@ func TestDaylightSaving(t *testing.T) {
 		if !reflect.DeepEqual(got, tc.hours) {
 			t.Errorf("hits per hour of %s = %v, want %v", tc.day.Format("January"), got, tc.hours)
 		}
+	}
+}
+
+// Check refuses options with no valid code, a valid code outside 100-999 or a visit timeout under a second or over 31
+// days, and NewBatch panics with its error.
+func TestCheck(t *testing.T) {
+	for _, tc := range []struct {
+		codes   []int
+		timeout time.Duration
+		want    string
+	}{
+		{nil, time.Hour, "kvstore: no valid status code"},
+		{[]int{}, time.Hour, "kvstore: no valid status code"},
+		{[]int{200, 0}, time.Hour, "kvstore: valid status code 0 is outside 100-999"},
+		{[]int{99}, time.Hour, "kvstore: valid status code 99 is outside 100-999"},
+		{[]int{1000}, time.Hour, "kvstore: valid status code 1000 is outside 100-999"},
+		{[]int{200}, time.Second - time.Nanosecond, "kvstore: visit timeout 999.999999ms is under a second"},
+		{[]int{200}, 0, "kvstore: visit timeout 0s is under a second"},
+		{[]int{200}, -time.Second, "kvstore: visit timeout -1s is under a second"},
+		{[]int{200}, abandonedAfter + time.Second, "kvstore: visit timeout 744h0m1s is over 31 days"},
+		{[]int{100, 999}, time.Second, ""},
+		{[]int{200}, abandonedAfter, ""},
+	} {
+		options := Options{ValidCodes: tc.codes, VisitTimeout: tc.timeout}
+
+		got := ""
+		if err := options.Check(); err != nil {
+			got = err.Error()
+		}
+
+		if got != tc.want {
+			t.Errorf("Check with codes %v and timeout %v = %q, want %q", tc.codes, tc.timeout, got, tc.want)
+		}
+
+		func() {
+			defer func() {
+				got := ""
+				if panicked := recover(); panicked != nil {
+					got = fmt.Sprint(panicked)
+				}
+
+				if got != tc.want {
+					t.Errorf("NewBatch with codes %v and timeout %v panicked with %q, want %q", tc.codes, tc.timeout,
+						got, tc.want)
+				}
+			}()
+
+			batchIn(time.UTC, options)
+		}()
 	}
 }
 
