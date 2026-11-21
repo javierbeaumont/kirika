@@ -578,3 +578,13 @@ func TestNewestPage(t *testing.T) {
 		t.Errorf("pages by year %v, want %v", b.yearPages, want)
 	}
 }
+
+// The end of a prefix is the least key above every key that starts with it, and the prefix stays as it was.
+func TestPrefixEnd(t *testing.T) {
+	for prefix, want := range map[string]string{"a": "b", "ab": "ac", "a\xff": "b", "a\xff\xff": "b"} {
+		in := []byte(prefix)
+		if got := string(prefixEnd(in)); got != want || string(in) != prefix {
+			t.Errorf("prefixEnd(%q) = %q and the prefix %q; want %q and the prefix unchanged", prefix, got, in, want)
+		}
+	}
+}

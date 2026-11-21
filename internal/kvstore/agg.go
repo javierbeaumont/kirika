@@ -484,17 +484,23 @@ func (db *DB) Hosts() ([]Host, error) {
 		cur := tx.Bucket(bktAgg).Cursor()
 
 		// A host's day keys are adjacent and in date order.
-		for k, _ := cur.Seek(day); bytes.HasPrefix(k, day); k, _ = cur.Next() {
-			name, month, ok := splitDay(k[len(day):])
+		for first, _ := cur.Seek(day); bytes.HasPrefix(first, day); {
+			name, firstMonth, ok := splitDay(first[len(day):])
 			if !ok {
-				return fmt.Errorf("%w: %q", errBadKey, k)
+				return fmt.Errorf("%w: %q", errBadKey, first)
 			}
 
-			if n := len(out); n > 0 && out[n-1].Name == name {
-				out[n-1].Last = month
-			} else {
-				out = append(out, Host{Name: name, First: month, Last: month})
+			// From the key after this host's, or from past the end, Prev lands on its last day key.
+			next, _ := cur.Seek(prefixEnd(first[:len(first)-len("YYYYMMDD")]))
+			last, _ := cur.Prev()
+
+			_, lastMonth, ok := splitDay(last[len(day):])
+			if !ok {
+				return fmt.Errorf("%w: %q", errBadKey, last)
 			}
+
+			out = append(out, Host{Name: name, First: firstMonth, Last: lastMonth})
+			first = next
 		}
 
 		return nil
@@ -506,6 +512,20 @@ func (db *DB) Hosts() ([]Host, error) {
 	slices.SortFunc(out, func(a, b Host) int { return strings.Compare(a.Name, b.Name) })
 
 	return out, nil
+}
+
+// Returns the least key above every key that starts with prefix, which must hold a byte below 0xff.
+func prefixEnd(prefix []byte) []byte {
+	end := bytes.Clone(prefix)
+
+	i := len(end) - 1
+	for end[i] == 0xff {
+		i--
+	}
+
+	end[i]++
+
+	return end[:i+1]
 }
 
 // Returns the host and the YYYY-MM month of a day key from what follows its encKey(tagDay). ok is false for a key of

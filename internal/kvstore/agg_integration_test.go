@@ -331,6 +331,57 @@ func TestHostListCorrupt(t *testing.T) {
 	}
 }
 
+// Hosts reads the last day key of a host with no key after it.
+func TestHostListLastKey(t *testing.T) {
+	db := openStore(t)
+	late := base.AddDate(0, 2, 0)
+
+	for _, key := range [][]byte{
+		timeKey(tagDay, "a", base.Format("20060102")), timeKey(tagDay, "h", base.Format("20060102")),
+		timeKey(tagDay, "h", late.Format("20060102")),
+	} {
+		putRaw(t, db, bktAgg, key, nil)
+	}
+
+	want := []Host{{"a", "2000-01", "2000-01"}, {"h", "2000-01", late.Format("2006-01")}}
+	if got, err := db.Hosts(); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("Hosts = %+v, %v; want %+v", got, err, want)
+	}
+}
+
+// A last day key of another shape fails Hosts.
+func TestHostListCorruptLast(t *testing.T) {
+	db := openStore(t)
+	putRaw(t, db, bktAgg, timeKey(tagDay, "h", "20000101"), nil)
+	putRaw(t, db, bktAgg, timeKey(tagDay, "h", "200001019"), nil)
+
+	if _, err := db.Hosts(); !errors.Is(err, errBadKey) {
+		t.Errorf("Hosts: err = %v, want errBadKey", err)
+	}
+}
+
+// Hosts lists a host whose last date sorts after every valid date.
+func TestHostListDateAfterAll(t *testing.T) {
+	db := openStore(t)
+	putRaw(t, db, bktAgg, timeKey(tagDay, "h", "20000101"), nil)
+	putRaw(t, db, bktAgg, timeKey(tagDay, "h", "\xff1234567"), nil)
+
+	if got, err := db.Hosts(); err != nil || len(got) != 1 || got[0].Name != "h" || got[0].First != "2000-01" {
+		t.Errorf("Hosts = %+v, %v; want h only, from 2000-01", got, err)
+	}
+}
+
+// Hosts reads a day key whose host length is encoded in more bytes than it needs.
+func TestHostListLongLength(t *testing.T) {
+	db := openStore(t)
+	putRaw(t, db, bktAgg, append(encKey(tagDay), 0x81, 0x00, 'h', '2', '0', '0', '0', '0', '1', '0', '1'), nil)
+
+	want := []Host{{"h", "2000-01", "2000-01"}}
+	if got, err := db.Hosts(); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("Hosts = %+v, %v; want %+v", got, err, want)
+	}
+}
+
 // Bandwidth is capped at math.MaxInt64 across flushes.
 func TestBandwidthCappedAcrossFlushes(t *testing.T) {
 	db := openStore(t)
