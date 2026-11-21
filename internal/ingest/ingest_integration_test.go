@@ -141,8 +141,8 @@ func read(t *testing.T, r *Reader) Result {
 	return res
 }
 
-// A read tells how many of its counted lines are pages of a year the store had closed before it: none of a year it
-// closes itself, nor of the year after the last closed one.
+// A read tells how many of its counted lines are pages with a client of a year the store had closed before it: none of
+// a year it closes itself, nor of the year after the last closed one.
 func TestClosedYearPages(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")

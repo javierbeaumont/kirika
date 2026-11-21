@@ -86,18 +86,18 @@ func DefaultOptions() Options {
 // Batch holds in memory what applied events add and the log states set on it, until DB.Flush writes them in one
 // transaction.
 type Batch struct {
-	cut        string // "#" and "?", which end a path (RFC 3986, section 3.3), and the query separators
-	d          map[string]tally
-	events     []sessEvent // in log order
-	index      []string    // "/" and an index page name each
-	loc        *time.Location
-	newestPage time.Time // in the store's zone
-	notPage    map[string]bool
-	state      map[string]LogState // by log path
-	timeout    time.Duration
-	uniques    map[sketchID]map[string]bool // the clients of each sketch
-	valid      map[int]bool
-	yearPages  map[int]int // the pages of each year
+	clientPages map[int]int // by year
+	cut         string      // "#" and "?", which end a path (RFC 3986, section 3.3), and the query separators
+	d           map[string]tally
+	events      []sessEvent // in log order
+	index       []string    // "/" and an index page name each
+	loc         *time.Location
+	newestPage  time.Time // in the store's zone
+	notPage     map[string]bool
+	state       map[string]LogState // by log path
+	timeout     time.Duration
+	uniques     map[sketchID]map[string]bool // the clients of each sketch
+	valid       map[int]bool
 }
 
 // Host is a host with data and the YYYY-MM months, in the store's zone, of its first and last days.
@@ -120,15 +120,15 @@ func (db *DB) NewBatch(o Options) *Batch {
 	}
 
 	b := &Batch{
-		cut:       "#?" + o.QuerySeparators,
-		d:         map[string]tally{},
-		loc:       db.loc,
-		notPage:   notPageSet(o.NotPages, o.Pages),
-		state:     map[string]LogState{},
-		timeout:   o.VisitTimeout,
-		uniques:   map[sketchID]map[string]bool{},
-		valid:     map[int]bool{},
-		yearPages: map[int]int{},
+		clientPages: map[int]int{},
+		cut:         "#?" + o.QuerySeparators,
+		d:           map[string]tally{},
+		loc:         db.loc,
+		notPage:     notPageSet(o.NotPages, o.Pages),
+		state:       map[string]LogState{},
+		timeout:     o.VisitTimeout,
+		uniques:     map[sketchID]map[string]bool{},
+		valid:       map[int]bool{},
 	}
 
 	for _, name := range o.IndexPages {
@@ -193,15 +193,17 @@ func (b *Batch) Apply(event logparse.Event) {
 		b.add(dimKey(tagRef, host, month, clip(referrer)), trafficClass, counts)
 	}
 
-	if counts.Pages == 1 {
-		b.yearPages[localTime.Year()]++
-
-		if localTime.After(b.newestPage) {
-			b.newestPage = localTime
-		}
+	if counts.Pages != 1 {
+		return
 	}
 
-	if event.ClientIP != "" && counts.Pages == 1 {
+	if localTime.After(b.newestPage) {
+		b.newestPage = localTime
+	}
+
+	if event.ClientIP != "" {
+		b.clientPages[localTime.Year()]++
+
 		visitor := clientKey(event.ClientIP)
 		b.addUnique(host, month, trafficClass, visitor)
 
@@ -282,8 +284,9 @@ func clip(s string) string {
 
 // Flush writes the batch in one transaction and empties it: its counters and sessions add to the stored ones, its
 // clients to the stored sketches, and its log states replace theirs. Its newest page then closes the years before its
-// own but, while it is of January, not the one just before. It returns how many of its pages are of a year closed
-// before the flush: they count in all but the unique visitors. On error nothing is written and the batch is kept.
+// own but, while it is of January, not the one just before. It returns how many of its pages with a client are of a
+// year closed before the flush: they count in all but the unique visitors. On error nothing is written and the batch is
+// kept.
 func (db *DB) Flush(b *Batch) (closedYearPages int, err error) {
 	if len(b.d) == 0 && len(b.state) == 0 {
 		return 0, nil
@@ -335,7 +338,7 @@ func (db *DB) Flush(b *Batch) (closedYearPages int, err error) {
 			return err
 		}
 
-		for year, pages := range b.yearPages {
+		for year, pages := range b.clientPages {
 			if year <= lastClosed {
 				closedYearPages += pages
 			}
@@ -356,7 +359,7 @@ func (db *DB) Flush(b *Batch) (closedYearPages int, err error) {
 	b.events = nil
 	b.newestPage = time.Time{}
 	b.state = map[string]LogState{}
-	b.yearPages = map[int]int{}
+	b.clientPages = map[int]int{}
 
 	return closedYearPages, nil
 }

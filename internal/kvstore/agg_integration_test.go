@@ -453,9 +453,9 @@ func TestFlushAdds(t *testing.T) {
 				len(b.d), len(b.uniques), len(b.events), len(b.state))
 		}
 
-		if !b.newestPage.IsZero() || len(b.yearPages) != 0 {
+		if !b.newestPage.IsZero() || len(b.clientPages) != 0 {
 			t.Fatalf("the batch keeps its newest page %v and the pages of %d years after a flush", b.newestPage,
-				len(b.yearPages))
+				len(b.clientPages))
 		}
 	}
 

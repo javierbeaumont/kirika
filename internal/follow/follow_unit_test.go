@@ -179,8 +179,8 @@ func TestRunErrors(t *testing.T) {
 	}
 }
 
-// A read with an unreadable line or a page of a closed year logs its counts as a warning, about the unreadable lines
-// when it has both; any other that took lines at debug level; and one that took none nothing.
+// A read with an unreadable line or a page with a client of a closed year logs its counts as a warning, about the
+// unreadable lines when it has both; any other that took lines at debug level; and one that took none nothing.
 func TestRunReport(t *testing.T) {
 	logged, _ := follow(t, time.Nanosecond,
 		step{res: ingest.Result{Counted: 3, Malformed: 1}},

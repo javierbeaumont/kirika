@@ -72,7 +72,7 @@ func DefaultMethods() []string {
 // Result counts the lines of a read by what became of them.
 type Result struct {
 	Counted         int // in the store
-	ClosedYearPages int // of the counted lines, the pages of a year closed before the read: they add no unique visitor
+	ClosedYearPages int // the counted pages with a client of a year closed before the read: no unique visitor
 	Blank           int // empty or spaces only
 	NotAccess       int // a message that is not an access, which Caddy writes in its log too
 	Dropped         int // a method out of Options.Methods

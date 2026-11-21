@@ -40,9 +40,9 @@ type Reader interface {
 
 // Run reads reader with ctx now, then every interval until ctx ends, calling onChange, unless nil, after each read that
 // counted a line. It logs to log, unless nil: a failed read as an error, once until the error changes or a read
-// succeeds again, which it tells too; the counts of a read with unreadable lines or pages of a closed year as a
-// warning; and those of any other read that took lines at debug level. A read that ctx stopped is not logged. It panics
-// if interval is not positive.
+// succeeds again, which it tells too; the counts of a read with unreadable lines or pages with a client of a closed
+// year as a warning; and those of any other read that took lines at debug level. A read that ctx stopped is not logged.
+// It panics if interval is not positive.
 func Run(ctx context.Context, reader Reader, interval time.Duration, log *slog.Logger, onChange func()) {
 	if interval <= 0 {
 		panic(fmt.Sprintf("follow: interval %v is not positive", interval))
@@ -89,8 +89,8 @@ func Run(ctx context.Context, reader Reader, interval time.Duration, log *slog.L
 	}
 }
 
-// Logs the counts of a read that took lines: as a warning when some were unreadable or pages of a closed year, else at
-// debug level.
+// Logs the counts of a read that took lines: as a warning when some were unreadable or pages with a client of a closed
+// year, else at debug level.
 func report(log *slog.Logger, res ingest.Result) {
 	attrs := []any{
 		"counted", res.Counted, "closed_year_pages", res.ClosedYearPages, "blank", res.Blank,

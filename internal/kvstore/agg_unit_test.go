@@ -561,8 +561,8 @@ func TestMonths(t *testing.T) {
 	}
 }
 
-// A batch keeps its newest page and the pages of each year, both in the store's zone. A hit that is no page adds to
-// neither.
+// A batch keeps its newest page and the pages with a client of each year, both in the store's zone. A hit that is no
+// page adds to neither, and a page with no client only to the newest page.
 func TestNewestPage(t *testing.T) {
 	loc, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {
@@ -574,15 +574,16 @@ func TestNewestPage(t *testing.T) {
 
 	b := batchIn(loc, DefaultOptions())
 	b.Apply(page("h", "/", 200, 1, february))
-	b.Apply(page("h", "/", 200, 1, newYear))
-	b.Apply(page("h", "/logo.png", 200, 1, february.AddDate(1, 0, 0)))
+	b.Apply(from("192.0.2.1", page("h", "/", 200, 1, newYear)))
+	b.Apply(from("192.0.2.2", page("h", "/", 200, 1, newYear)))
+	b.Apply(from("192.0.2.1", page("h", "/logo.png", 200, 1, february.AddDate(1, 0, 0))))
 
 	if !b.newestPage.Equal(february) || b.newestPage.Month() != time.February {
 		t.Errorf("newest page %v, want %v in the store's zone", b.newestPage, february.In(loc))
 	}
 
-	if want := map[int]int{newYear.In(loc).Year(): 2}; !reflect.DeepEqual(b.yearPages, want) {
-		t.Errorf("pages by year %v, want %v", b.yearPages, want)
+	if want := map[int]int{newYear.In(loc).Year(): 2}; !reflect.DeepEqual(b.clientPages, want) {
+		t.Errorf("pages with a client by year %v, want %v", b.clientPages, want)
 	}
 }
 

@@ -259,7 +259,7 @@ func TestSketchKeyed(t *testing.T) {
 	}
 }
 
-// Flushes evs in one batch and returns how many of its pages are of a closed year.
+// Flushes evs in one batch and returns how many of its pages with a client are of a closed year.
 func flushClosed(t *testing.T, db *DB, evs ...logparse.Event) int {
 	t.Helper()
 
@@ -278,8 +278,8 @@ func flushClosed(t *testing.T, db *DB, evs ...logparse.Event) int {
 
 // A year closes when the store counts a page dated in February of the next year or later, and a page of January closes
 // the year before last only. A closed year's key goes, and so does a key with no year. A page of a closed year, or of
-// an older one that never had a key, then counts in all but the unique visitors, and the flush tells how many there
-// are.
+// an older one that never had a key, then counts in all but the unique visitors, and the flush tells how many of them
+// have a client.
 func TestYearCloses(t *testing.T) {
 	db := openStore(t)
 	nextYear := base.AddDate(1, 0, 0)
