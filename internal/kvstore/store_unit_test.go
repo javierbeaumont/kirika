@@ -86,3 +86,22 @@ func TestSystemZone(t *testing.T) {
 		}
 	}
 }
+
+// A zone of the tz database's posix/ or right/ copies loses that prefix; any other, and either prefix alone, is kept.
+func TestPlainZone(t *testing.T) {
+	for zone, want := range map[string]string{
+		"posix/Europe/Madrid": "Europe/Madrid",
+		"right/Europe/Madrid": "Europe/Madrid",
+		"right/UTC":           "UTC",
+		"Europe/Madrid":       "Europe/Madrid",
+		"posixrules":          "posixrules",
+		"Etc/posix/UTC":       "Etc/posix/UTC",
+		"posix/":              "posix/",
+		"right/":              "right/",
+		"":                    "",
+	} {
+		if got := plainZone(zone); got != want {
+			t.Errorf("plainZone(%q) = %q, want %q", zone, got, want)
+		}
+	}
+}

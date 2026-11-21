@@ -505,6 +505,49 @@ func TestOpenSystemZone(t *testing.T) {
 	}
 }
 
+// A zone of the tz database's posix/ or right/ copies counts without that prefix, whether configured, stored or the
+// system's. Either prefix alone is refused.
+func TestOpenPlainZone(t *testing.T) {
+	t.Setenv("TZ", "/usr/share/zoneinfo/right/Africa/Nairobi")
+
+	path := filepath.Join(t.TempDir(), "kirika.db")
+	if got, err := openZone(t, path, ""); got != "Africa/Nairobi" {
+		t.Errorf("system zone right/Africa/Nairobi: %q, %v; want Africa/Nairobi", got, err)
+	}
+
+	for _, zone := range []string{"posix/Africa/Nairobi", "right/Africa/Nairobi"} {
+		if got, err := openZone(t, path, zone); got != "Africa/Nairobi" {
+			t.Errorf("reopened with %s: %q, %v; want Africa/Nairobi", zone, got, err)
+		}
+	}
+
+	got, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), "posix/America/Sao_Paulo")
+	if got != "America/Sao_Paulo" {
+		t.Errorf("new store in posix/America/Sao_Paulo: %q, %v; want America/Sao_Paulo", got, err)
+	}
+
+	stored := storePath(t)
+	setMeta(t, stored, metaZone, []byte("right/Africa/Nairobi"))
+
+	for _, zone := range []string{"", "Africa/Nairobi", "right/Africa/Nairobi"} {
+		if got, err := openZone(t, stored, zone); got != "Africa/Nairobi" {
+			t.Errorf("stored right/Africa/Nairobi, opened with %q: %q, %v; want Africa/Nairobi", zone, got, err)
+		}
+	}
+
+	for _, zone := range []string{"posix/", "right/"} {
+		if _, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), zone); err == nil {
+			t.Errorf("new store in %s: no error", zone)
+		}
+
+		t.Setenv("TZ", "/usr/share/zoneinfo/"+zone)
+
+		if _, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), ""); err == nil {
+			t.Errorf("system zone %s: no error", zone)
+		}
+	}
+}
+
 func TestReadText(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "timezone")
 	if err := os.WriteFile(path, []byte("America/Halifax\n"), 0o600); err != nil {

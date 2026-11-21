@@ -67,10 +67,10 @@ type DB struct {
 // Open opens the store at path, creating it if missing. timeout bounds each wait for another process to release the
 // file, one to read it and one to write it (0 waits forever). zone names the time zone of its hours, days and months,
 // such as America/New_York. When empty, it is the zone the store keeps or, for a new store, the system's, else UTC. A
-// file with buckets but no schema version, such as another program's, is refused before anything is written, and so is
-// a store written by a newer build or with a corrupt schema version. A corrupt salt is refused too, and so is a zone
-// the system does not know, other than the stored one, or that is each run's: Local, and localtime, which Debian links
-// to /etc/localtime.
+// zone of the tz database's posix/ or right/ copies counts without that prefix. A file with buckets but no schema
+// version, such as another program's, is refused before anything is written, and so is a store written by a newer build
+// or with a corrupt schema version. A corrupt salt is refused too, and so is a zone the system does not know, other
+// than the stored one, or that is each run's: Local, and localtime, which Debian links to /etc/localtime.
 func Open(path string, timeout time.Duration, zone string) (*DB, error) {
 	if err := probe(path, timeout); err != nil {
 		return nil, err
@@ -152,10 +152,12 @@ func (db *DB) init(zone string) error {
 			}
 		}
 
-		stored := string(meta.Get(metaZone))
+		stored := plainZone(string(meta.Get(metaZone)))
+		zone = plainZone(zone)
+
 		switch {
 		case stored == "" && zone == "":
-			zone = systemZone(os.LookupEnv, os.Readlink, readText)
+			zone = plainZone(systemZone(os.LookupEnv, os.Readlink, readText))
 		case zone == "":
 			zone = stored
 		case stored != "" && zone != stored:
@@ -251,6 +253,19 @@ func zoneinfoName(path string) (name string, ok bool) {
 	_, name, found := strings.Cut(path, "zoneinfo/")
 
 	return name, found && name != ""
+}
+
+// Returns zone without a leading posix/ or right/, which name the tz database's two copies of its zones. The posix/
+// ones are the same; Go skips the leap seconds the right/ ones count, so each change of offset falls as many seconds
+// late as leap seconds came before it. Either prefix alone is kept: emptied, it would pass as no zone.
+func plainZone(zone string) string {
+	for _, prefix := range []string{"posix/", "right/"} {
+		if name, ok := strings.CutPrefix(zone, prefix); ok && name != "" {
+			return name
+		}
+	}
+
+	return zone
 }
 
 // Returns the contents of the file at path.
