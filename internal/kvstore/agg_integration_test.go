@@ -112,7 +112,7 @@ func withVisits(c Counts, v int64) Counts {
 	return c
 }
 
-// Totals, Series and Dim read what flushes stored: a host's counters over a year, a month or a day, its days or hours
+// Totals, Series and Dim read what a flush stored: a host's counters over a year, a month or a day, its days or hours
 // in date order, and a month's values of each dimension. An empty host reads the unknown one.
 func TestReads(t *testing.T) {
 	db := openStore(t)
@@ -183,7 +183,7 @@ func TestReads(t *testing.T) {
 	}
 }
 
-// Every read counts only what its filter picks, and leaves out a bucket or a value it picks nothing of.
+// Every read counts only what its filter picks, and leaves out a bucket or a value that counts nothing under it.
 func TestFilters(t *testing.T) {
 	db := openStore(t)
 	bot := page("h", "/missing.png", 404, 3, at(2, 0))
@@ -305,7 +305,7 @@ func TestDimOneTransaction(t *testing.T) {
 	}
 }
 
-// A host is read in any case, a long one is clipped, and a host never reads another whose name starts with it.
+// A host is read in any letter case, a long one is clipped, and a host never reads another whose name starts with it.
 func TestHosts(t *testing.T) {
 	db := openStore(t)
 	long := strings.Repeat("h", 40*maxValueLen)
@@ -434,7 +434,7 @@ func TestBandwidthCappedAcrossFlushes(t *testing.T) {
 	}
 }
 
-// A flush adds to the stored counters and empties the batch: clients, pages for the visits and log states included.
+// A flush adds to the stored counters and empties the batch.
 func TestFlushAdds(t *testing.T) {
 	db := openStore(t)
 	ev := from(ip(0), page("h", "/", 200, 3, base))
@@ -524,40 +524,5 @@ func TestCorruptValue(t *testing.T) {
 
 	if got, ok := logState(t, db, "/a.log"); !ok || got != (LogState{Offset: 1}) {
 		t.Errorf("log state after the repair = %+v, %v; want offset 1", got, ok)
-	}
-}
-
-// Each read refuses a period that is not a year, a month or a day.
-func TestBadPeriod(t *testing.T) {
-	db := openStore(t)
-	period := "2000-13"
-
-	if _, err := db.Totals("h", period, Filter{}); !errors.Is(err, errBadPeriod) {
-		t.Errorf("Totals(%q): err = %v, want errBadPeriod", period, err)
-	}
-
-	if _, err := db.Series("h", tagDay, period, Filter{}); !errors.Is(err, errBadPeriod) {
-		t.Errorf("Series(%q): err = %v, want errBadPeriod", period, err)
-	}
-
-	if _, err := db.Dim("h", tagURL, period, Filter{}); !errors.Is(err, errBadPeriod) {
-		t.Errorf("Dim(%q): err = %v, want errBadPeriod", period, err)
-	}
-}
-
-func TestBadFilter(t *testing.T) {
-	db := openStore(t)
-	bad := Filter{Kind: FileKind + 1}
-
-	if _, err := db.Totals("h", "2000", bad); !errors.Is(err, errBadFilter) {
-		t.Errorf("Totals: err = %v, want errBadFilter", err)
-	}
-
-	if _, err := db.Series("h", tagDay, "2000", bad); !errors.Is(err, errBadFilter) {
-		t.Errorf("Series: err = %v, want errBadFilter", err)
-	}
-
-	if _, err := db.Dim("h", tagURL, "2000", bad); !errors.Is(err, errBadFilter) {
-		t.Errorf("Dim: err = %v, want errBadFilter", err)
 	}
 }

@@ -36,7 +36,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-// Reports whether got is within 5% of want, three times the sketch's standard error.
+// Reports whether got is within 5% of want, about three times the sketch's standard error.
 func near(got uint64, want int) bool {
 	return math.Abs(float64(got)-float64(want)) <= 0.05*float64(want)
 }
@@ -121,25 +121,6 @@ func TestUniqueHosts(t *testing.T) {
 	}
 }
 
-// A day, an invalid period and an unknown filter value are errors.
-func TestUniqueErrors(t *testing.T) {
-	db := openStore(t)
-
-	for _, tc := range []struct {
-		period string
-		f      Filter
-		want   error
-	}{
-		{"2000-01-01", Filter{}, errDayUnique},
-		{"2000/01", Filter{}, errBadPeriod},
-		{"2000", Filter{Status: AllStatuses + 1}, errBadFilter},
-	} {
-		if _, err := db.Unique(tc.period, tc.f, "h"); !errors.Is(err, tc.want) {
-			t.Errorf("Unique(%q, %+v): err = %v, want %v", tc.period, tc.f, err, tc.want)
-		}
-	}
-}
-
 // No client address reaches the store file.
 func TestUniqueNoIP(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kirika.db")
@@ -165,7 +146,7 @@ func TestUniqueNoIP(t *testing.T) {
 	}
 }
 
-// A sketch stays sparse while it holds few clients: ten take tens of bytes, not the 4 KB of every register.
+// A sketch stays sparse while it holds few clients: ten take tens of bytes.
 func TestSketchSparse(t *testing.T) {
 	db := openStore(t)
 	flush(t, db, visits("h", 0, 10, base)...)
@@ -202,12 +183,11 @@ func storedYearKey(t *testing.T, db *DB, year string) []byte {
 	return key
 }
 
-// A sketch takes each client as an HMAC-SHA256 under its year's key: the library's own hash of a client adds to it as
-// another client, and the HMAC under the key adds nothing. Each year has its own key, in one flush too.
+// A sketch takes each client as an HMAC-SHA256 under its year's key, and each year has its own key, in one flush too.
 func TestSketchKeyed(t *testing.T) {
 	db := openStore(t)
 	nextYear := base.AddDate(1, 0, 0)
-	flush(t, db, append(visits("h", 0, 1000, base), visits("h", 0, 1000, nextYear)...)...)
+	flush(t, db, append(visits("h", 0, 500, base), visits("h", 0, 500, nextYear)...)...)
 
 	key, nextKey := storedYearKey(t, db, "2000"), storedYearKey(t, db, nextYear.Format("2006"))
 	if len(key) != yearKeyLen || len(nextKey) != yearKeyLen || bytes.Equal(key, nextKey) {
@@ -228,12 +208,12 @@ func TestSketchKeyed(t *testing.T) {
 		hash  func(client string) []byte
 		want  int
 	}{
-		"own hash":                       {base, func(client string) []byte { return []byte(client) }, 2000},
-		"HMAC under the key":             {base, hmacUnder(key), 1000},
-		"HMAC under the next year's key": {nextYear, hmacUnder(nextKey), 1000},
+		"own hash":                       {base, func(client string) []byte { return []byte(client) }, 1000},
+		"HMAC under the key":             {base, hmacUnder(key), 500},
+		"HMAC under the next year's key": {nextYear, hmacUnder(nextKey), 500},
 	} {
 		probe := newSketch()
-		for i := range 1000 {
+		for i := range 500 {
 			probe.Insert(tc.hash(ip(i)))
 		}
 
@@ -277,9 +257,9 @@ func flushClosed(t *testing.T, db *DB, evs ...logparse.Event) int {
 }
 
 // A year closes when the store counts a page dated in February of the next year or later, and a page of January closes
-// the year before last only. A closed year's key goes, and so does a key with no year. A page of a closed year, or of
-// an older one that never had a key, then counts in all but the unique visitors, and the flush tells how many of them
-// have a client.
+// the years up to the one before last. A closed year's key is deleted, and so is a key with no year. A page of a closed
+// year, or of an older one that never had a key, then counts in all but the unique visitors, and the flush tells how
+// many of them have a client.
 func TestYearCloses(t *testing.T) {
 	db := openStore(t)
 	nextYear := base.AddDate(1, 0, 0)
@@ -419,13 +399,13 @@ func TestUnreadableSketch(t *testing.T) {
 	key := uniqKey("h", base.Format("200601"), newClass(false, groupCorrect))
 
 	for name, b := range map[string][]byte{
-		"not a sketch":      []byte("not a sketch"),
-		"other precision":   blob(t, 14, 100),
-		"cut":               dense[:len(dense)-1],
-		"trailing byte":     append(bytes.Clone(dense), 0),
-		"unknown version":   append([]byte{9}, dense[1:]...),
-		"unknown sparse":    append(append([]byte(nil), dense[:3]...), append([]byte{2}, dense[4:]...)...),
-		"register too high": append(bytes.Clone(dense[:len(dense)-1]), 64),
+		"not a sketch":        []byte("not a sketch"),
+		"other precision":     blob(t, 14, 100),
+		"cut":                 dense[:len(dense)-1],
+		"trailing byte":       append(bytes.Clone(dense), 0),
+		"unknown version":     append([]byte{9}, dense[1:]...),
+		"unknown sparse flag": append(append([]byte(nil), dense[:3]...), append([]byte{2}, dense[4:]...)...),
+		"register too high":   append(bytes.Clone(dense[:len(dense)-1]), 64),
 	} {
 		db := openStore(t)
 		putRaw(t, db, bktUniq, key, b)

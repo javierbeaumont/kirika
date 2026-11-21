@@ -124,7 +124,7 @@ func TestIsPage(t *testing.T) {
 	}
 }
 
-// NotPages adds to the file types and Pages takes from both, in any case. Neither reaches another set.
+// NotPages adds to the file types and Pages takes from both, in any letter case. Neither reaches another set.
 func TestNotPageSet(t *testing.T) {
 	notPage := notPageSet([]string{"ACTION", "Txt", "\u00d1"}, []string{"JSON", "txt"})
 

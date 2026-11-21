@@ -69,8 +69,8 @@ type DB struct {
 // such as America/New_York. When empty, it is the zone the store keeps or, for a new store, the system's, else UTC. A
 // zone of the tz database's posix/ or right/ copies counts without that prefix. A file with buckets but no schema
 // version, such as another program's, is refused before anything is written, and so is a store written by a newer build
-// or with a corrupt schema version. A corrupt salt is refused too, and so is a zone the system does not know, other
-// than the stored one, or that is each run's: Local, and localtime, which Debian links to /etc/localtime.
+// or with a corrupt schema version. A corrupt salt is refused too, and so is a zone other than the stored one, one the
+// system does not know, or one that is each run's: Local, and localtime, which Debian links to /etc/localtime.
 func Open(path string, timeout time.Duration, zone string) (*DB, error) {
 	if err := probe(path, timeout); err != nil {
 		return nil, err
@@ -208,8 +208,8 @@ func checkSchema(tx *bolt.Tx) error {
 }
 
 // Returns the name of the system's time zone. TZ names it when set, an empty one meaning UTC; a leading ":" is dropped,
-// and a path in TZ names the zone it links to. Without TZ, that path is /etc/localtime, and a copy there is named by
-// /etc/timezone or /var/db/zoneinfo. Else the zone is UTC.
+// and a path in TZ names the zone it is or links to. Without TZ, that path is /etc/localtime; when it names no zone,
+// /etc/timezone or /var/db/zoneinfo does. Else the zone is UTC.
 func systemZone(getenv func(string) (string, bool), readlink, readFile func(string) (string, error)) string {
 	file := "/etc/localtime"
 

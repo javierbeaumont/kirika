@@ -39,11 +39,11 @@ import (
 // The size in bytes of the store's salt, the key of the session IDs.
 const saltLen = 16
 
-// The format of a session value this build writes.
+// The format version of a session value this build writes.
 const sessionVersion = 1
 
-// How far a visit of any host may be before or after a batch's newest page, so neither a host with no more traffic
-// keeps its last sessions nor a clock jump keeps a visit ahead open.
+// How far a visit of any host may be before or after the newest of a batch's correct pages with a client, so neither a
+// host with no more traffic keeps its last sessions nor a clock jump keeps a visit ahead open.
 const abandonedAfter = 31 * 24 * time.Hour
 
 // The first and last Unix seconds of the years 1 to 9999, the times a visit may hold: any two subtract without
@@ -57,9 +57,9 @@ var errSaltCorrupt = errors.New("kvstore: corrupt salt")
 
 // What a batch keeps of a correct page for the visits, in memory only.
 type sessEvent struct {
+	at                 time.Time // in the store's zone
 	class              class
-	host, client, path string
-	t                  time.Time // in the store's zone
+	client, host, path string
 }
 
 // An open visit of a client.
@@ -75,7 +75,7 @@ type session struct {
 	visits []visit
 }
 
-// The Unix times of a batch's newest page and of each host's.
+// The Unix times of the newest of a batch's correct pages with a client and of each host's.
 type newestPages struct {
 	all    int64
 	byHost map[string]int64
@@ -112,8 +112,8 @@ func sessionID(mac hash.Hash, host, client string, visitClass class) []byte {
 	return mac.Sum(nil)[:16]
 }
 
-// Writes a session as its format version, its class and its host, then each visit's last time as a varint and its exit;
-// a string goes after its length.
+// Encodes a session as its format version, its class and its host, then each visit's last time as a varint and its
+// exit; a string goes after its length.
 func encodeSession(clientSession session) []byte {
 	encoded := appendString([]byte{sessionVersion, byte(clientSession.class)}, clientSession.host)
 	for _, open := range clientSession.visits {
@@ -123,7 +123,7 @@ func encodeSession(clientSession session) []byte {
 	return encoded
 }
 
-// Appends text after its length as a uvarint.
+// Appends the length of text as a uvarint, then text.
 func appendString(encoded []byte, text string) []byte {
 	return append(binary.AppendUvarint(encoded, uint64(len(text))), text...)
 }
@@ -136,7 +136,7 @@ func decodeSession(encoded []byte) (clientSession session, ok bool) {
 	}
 
 	clientSession.class = class(encoded[1])
-	if clientSession.class >= numClasses || clientSession.class.group() != groupCorrect {
+	if clientSession.class.group() != groupCorrect {
 		return session{}, false
 	}
 
@@ -181,8 +181,8 @@ func readString(encoded []byte) (text string, rest []byte, ok bool) {
 	return string(encoded[prefix:end]), encoded[end:], true
 }
 
-// Adds the batch's visits and their entry and exit pages to tallies. Times compare in whole seconds, as a session keeps
-// them.
+// Adds the batch's pages to the stored sessions, and to tallies the visits they open with their entry pages and the
+// exits of the visits that end. Times compare in whole seconds, as a session keeps them.
 func sessions(bucket *bolt.Bucket, salt []byte, batch *Batch, tallies map[string]tally) error {
 	if len(batch.events) == 0 {
 		return nil
@@ -207,7 +207,7 @@ func sessions(bucket *bolt.Bucket, salt []byte, batch *Batch, tallies map[string
 		}
 
 		addPage(clientSession, event, batch, tallies)
-		newest.add(event.host, event.t.Unix())
+		newest.add(event.host, event.at.Unix())
 	}
 
 	// The untouched sessions go first, while their nodes hold no more than a page: bbolt shifts a node's tail on each
@@ -234,7 +234,7 @@ func sessions(bucket *bolt.Bucket, salt []byte, batch *Batch, tallies map[string
 // before or after it, else to a new visit, counted with its entry page. The page becomes its visit's latest unless it
 // is older. Of two visits equally near, it joins the one whose latest page is before it.
 func addPage(clientSession *session, event sessEvent, batch *Batch, tallies map[string]tally) {
-	pageTime := event.t.Unix()
+	pageTime := event.at.Unix()
 	timeout := int64(batch.timeout / time.Second)
 	nearest, nearestGap := -1, int64(0)
 
@@ -252,9 +252,9 @@ func addPage(clientSession *session, event sessEvent, batch *Batch, tallies map[
 	switch {
 	case nearest < 0:
 		count := Counts{Visits: 1}
-		addTo(tallies, timeKey(tagHour, event.host, event.t.Format("2006010215")), event.class, count)
-		addTo(tallies, timeKey(tagDay, event.host, event.t.Format("20060102")), event.class, count)
-		addTo(tallies, dimKey(tagEntry, event.host, event.t.Format("200601"), event.path), event.class, count)
+		addTo(tallies, timeKey(tagHour, event.host, event.at.Format("2006010215")), event.class, count)
+		addTo(tallies, timeKey(tagDay, event.host, event.at.Format("20060102")), event.class, count)
+		addTo(tallies, dimKey(tagEntry, event.host, event.at.Format("200601"), event.path), event.class, count)
 		clientSession.visits = append(clientSession.visits, visit{exit: event.path, last: pageTime})
 	case pageTime >= clientSession.visits[nearest].last:
 		clientSession.visits[nearest] = visit{exit: event.path, last: pageTime}
@@ -270,7 +270,7 @@ func distance(first, second int64) int64 {
 	return second - first
 }
 
-// Takes into account a page of host at a Unix time.
+// Updates the newest times with a page of host at a Unix time.
 func (newest *newestPages) add(host string, pageTime int64) {
 	newest.all = max(newest.all, pageTime)
 
@@ -279,8 +279,8 @@ func (newest *newestPages) add(host string, pageTime int64) {
 	}
 }
 
-// Ends the visits of a session more than the timeout behind its host's newest page in the batch, or more than
-// abandonedAfter from the batch's newest page, and adds their exits to tallies. Returns how many ended.
+// Ends the visits of a session more than the timeout behind the newest page of its host, or more than abandonedAfter
+// from that of any host, and adds their exits to tallies. Returns how many ended.
 func endVisits(clientSession *session, newest newestPages, batch *Batch, tallies map[string]tally) int {
 	timeout := int64(batch.timeout / time.Second)
 	abandoned := int64(abandonedAfter / time.Second)
@@ -303,7 +303,8 @@ func endVisits(clientSession *session, newest newestPages, batch *Batch, tallies
 	return ended
 }
 
-// Ends the visits of the stored sessions not in touched as endVisits does, and deletes the unreadable ones.
+// Ends the visits of the stored sessions not in touched as endVisits does, then stores the sessions that changed and
+// deletes those left with no visit and the unreadable ones.
 func endVisitsOf(bucket *bolt.Bucket, touched map[string]*session, newest newestPages, batch *Batch,
 	tallies map[string]tally,
 ) error {
@@ -346,8 +347,7 @@ func storeSession(bucket *bolt.Bucket, id []byte, clientSession session) error {
 	return bucket.Put(id, encodeSession(clientSession))
 }
 
-// Adds an ended visit's latest page to the exit pages of its session's host and class, in the month it came in, in
-// zone.
+// Adds an ended visit's latest page to the exit pages of its session's host and class, in that page's month in zone.
 func endVisit(tallies map[string]tally, clientSession session, ended visit, zone *time.Location) {
 	month := time.Unix(ended.last, 0).In(zone).Format("200601")
 	addTo(tallies, dimKey(tagExit, clientSession.host, month, ended.exit), clientSession.class, Counts{Visits: 1})

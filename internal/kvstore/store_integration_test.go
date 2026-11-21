@@ -26,6 +26,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"testing"
 	"time"
 
@@ -418,6 +419,32 @@ func TestSaltCorrupt(t *testing.T) {
 				t.Errorf("salt of %d bytes, timeout %v: err = %v, want errSaltCorrupt", len(salt), timeout, err)
 			}
 		}
+	}
+}
+
+// A salt read from the store does not point into the file's mapping, which bbolt releases on Close.
+func TestSaltOutlivesMapping(t *testing.T) {
+	path := storePath(t)
+	setMeta(t, path, []byte("filler"), make([]byte, 4096)) // a meta bucket this large is not inline
+
+	db, err := Open(path, time.Second, "UTC")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	salt, want := db.salt, bytes.Clone(db.salt)
+	closeStore(t, db)
+
+	// A read of the released mapping panics, rather than stopping the test binary.
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	defer func() {
+		if fault := recover(); fault != nil {
+			t.Errorf("salt read after Close: %v", fault)
+		}
+	}()
+
+	if !bytes.Equal(salt, want) {
+		t.Errorf("salt after Close = %x, want %x", salt, want)
 	}
 }
 

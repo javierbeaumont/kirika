@@ -33,7 +33,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-// Returns a correct page request of host from client to path at t.
+// Returns a correct request of host from client to path at t.
 func req(host, client, path string, t time.Time) logparse.Event {
 	return from(client, page(host, path, 200, 1, t))
 }
@@ -56,8 +56,8 @@ func sessionCount(t *testing.T, db *DB) int {
 	return n
 }
 
-// A page opens a visit when it is its client's first, or more than the timeout after the previous one, whatever the
-// client's form.
+// A page opens a visit when it is its client's first on its host, or more than the timeout after the previous one,
+// whatever the client's form; a page with no client opens none.
 func TestVisits(t *testing.T) {
 	db := openStore(t)
 	t0 := at(1, 10)
@@ -128,7 +128,7 @@ func TestVisitClasses(t *testing.T) {
 	}
 }
 
-// A visit counts in the hour, day and month of the store's zone, and its exit in the month it ended there.
+// A visit counts in the hour and month of the store's zone, and its exit in the month it ended there.
 func TestVisitZone(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "kirika.db"), time.Second, "Asia/Kolkata")
 	if err != nil {
@@ -193,7 +193,7 @@ func TestVisitAcrossFlushes(t *testing.T) {
 	}
 }
 
-// A flush with no page closes no visit, at a negative Unix time too: a client's pages on either side of it make one
+// A flush with no page ends no visit, at a negative Unix time too: a client's pages on either side of it make one
 // visit.
 func TestFlushWithoutPages(t *testing.T) {
 	for _, t0 := range []time.Time{at(1, 10), at(1, 10).AddDate(-50, 0, 0)} {
@@ -223,8 +223,8 @@ func TestBotExit(t *testing.T) {
 	}
 }
 
-// A visit enters on its first page and exits on its latest, files take no part, and an idle session ends and is
-// deleted.
+// A visit enters on its first page and exits on its latest, files take no part, and an idle visit ends and its session
+// is deleted.
 func TestEntryExit(t *testing.T) {
 	db := openStore(t)
 	t0 := at(1, 10)
@@ -384,7 +384,7 @@ func TestAbandonedVisit(t *testing.T) {
 	}
 }
 
-// An exit counts in the month its visit ended, even when a later month closes it.
+// An exit counts in the month its visit ended, even when a page of a later month ends it.
 func TestExitMonth(t *testing.T) {
 	db := openStore(t)
 	end := base.AddDate(0, 1, 0).Add(-10 * time.Minute)
@@ -483,7 +483,7 @@ func TestVisitWholeSeconds(t *testing.T) {
 	}
 }
 
-// Visits work the same at negative Unix times: an NCSA log may go back to the year 1000.
+// Visits work the same at negative Unix times, which an NCSA log can hold.
 func TestVisitBefore1970(t *testing.T) {
 	db := openStore(t)
 	old := base.AddDate(-50, 0, 0)

@@ -26,9 +26,9 @@ import (
 	"testing"
 )
 
-// TZ names the zone when set, an empty one meaning UTC, or a path in it links to the zone. Without TZ, /etc/localtime
-// links to it, or /etc/timezone or /var/db/zoneinfo names a copy there. Else it is UTC. A zoneinfo directory itself
-// names no zone.
+// TZ names the zone when set, an empty one meaning UTC, or a path in it is or links to the zone. Without TZ, that path
+// is /etc/localtime; when it names no zone, /etc/timezone or /var/db/zoneinfo does. Else it is UTC. A zoneinfo
+// directory itself names no zone.
 func TestSystemZone(t *testing.T) {
 	const (
 		local  = "/etc/localtime"

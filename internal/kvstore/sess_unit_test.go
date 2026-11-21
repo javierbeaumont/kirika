@@ -49,11 +49,11 @@ func TestSessionID(t *testing.T) {
 	}
 
 	for name, other := range map[string][]byte{
-		"salt":   idUnder(bytes.Repeat([]byte{2}, saltLen), "h", "c", humanVisits),
-		"host":   idUnder(salt, "g", "c", humanVisits),
-		"client": idUnder(salt, "h", "d", humanVisits),
-		"class":  idUnder(salt, "h", "c", newClass(true, groupCorrect)),
-		"split":  idUnder(salt, "hc", "", humanVisits),
+		"salt":                     idUnder(bytes.Repeat([]byte{2}, saltLen), "h", "c", humanVisits),
+		"host":                     idUnder(salt, "g", "c", humanVisits),
+		"client":                   idUnder(salt, "h", "d", humanVisits),
+		"class":                    idUnder(salt, "h", "c", newClass(true, groupCorrect)),
+		"split of host and client": idUnder(salt, "hc", "", humanVisits),
 	} {
 		if bytes.Equal(other, id) {
 			t.Errorf("another %s gives the same ID", name)
@@ -84,21 +84,23 @@ func TestSessionCodec(t *testing.T) {
 	}
 
 	for name, encoded := range map[string][]byte{
-		"empty":           {},
-		"no class":        {sessionVersion},
-		"version 0":       append([]byte{0}, good[1:]...),
-		"error class":     withClass(newClass(false, groupError)),
-		"unknown class":   withClass(numClasses),
-		"no host":         upTo(2),
-		"host too long":   upTo(2, 5, 'h'),
-		"no visit":        upTo(4),
-		"cut varint":      upTo(4, 0x80),
-		"varint overflow": upTo(4, bytes.Repeat([]byte{0xff}, 11)...),
-		"no exit":         upTo(5),
-		"exit too long":   upTo(5, 9, '/', 'b'),
-		"trailing byte":   upTo(len(good), 0),
-		"before year 1":   withLast(firstVisitTime - 1),
-		"after year 9999": withLast(lastVisitTime + 1),
+		"empty":                {},
+		"no class":             {sessionVersion},
+		"version 0":            append([]byte{0}, good[1:]...),
+		"error class":          withClass(newClass(false, groupError)),
+		"unknown class":        withClass(numClasses),
+		"no host":              upTo(2),
+		"host too long":        upTo(2, 5, 'h'),
+		"host a byte too long": upTo(2, 2, 'h'),
+		"no visit":             upTo(4),
+		"cut varint":           upTo(4, 0x80),
+		"varint overflow":      upTo(4, bytes.Repeat([]byte{0xff}, 11)...),
+		"no exit":              upTo(5),
+		"exit too long":        upTo(5, 9, '/', 'b'),
+		"exit a byte too long": upTo(5, 2, '/'),
+		"trailing byte":        upTo(len(good), 0),
+		"before year 1":        withLast(firstVisitTime - 1),
+		"after year 9999":      withLast(lastVisitTime + 1),
 	} {
 		if _, ok := decodeSession(encoded); ok {
 			t.Errorf("%s %x: decoded", name, encoded)
@@ -177,7 +179,8 @@ func TestAddPage(t *testing.T) {
 	} {
 		tallies := map[string]tally{}
 		clientSession := session{class: humanVisits, host: "h", visits: slices.Clone(tc.visits)}
-		addPage(&clientSession, sessEvent{humanVisits, "h", "c", "/p", tc.page}, batch, tallies)
+		event := sessEvent{at: tc.page, class: humanVisits, client: "c", host: "h", path: "/p"}
+		addPage(&clientSession, event, batch, tallies)
 
 		if !reflect.DeepEqual(clientSession.visits, tc.want) {
 			t.Errorf("%s: visits = %+v, want %+v", tc.name, clientSession.visits, tc.want)
@@ -186,6 +189,24 @@ func TestAddPage(t *testing.T) {
 		entry := dimKey(tagEntry, "h", tc.page.Format("200601"), "/p")
 		if opened := len(tallies[string(entry)]) > 0; opened != tc.opened {
 			t.Errorf("%s: opened a visit = %v, want %v", tc.name, opened, tc.opened)
+		}
+	}
+}
+
+// An opened visit counts in the hour and day of its page, in the page's zone.
+func TestAddPageZone(t *testing.T) {
+	tallies := map[string]tally{}
+	ahead := time.FixedZone("UTC+13", 13*60*60)
+	clientSession := session{class: humanVisits, host: "h"}
+	event := sessEvent{at: base.Add(-time.Hour).In(ahead), class: humanVisits, client: "c", host: "h", path: "/p"}
+	addPage(&clientSession, event, batchIn(time.UTC, DefaultOptions()), tallies)
+
+	for _, key := range [][]byte{
+		timeKey(tagHour, "h", base.Add(12*time.Hour).Format("2006010215")),
+		timeKey(tagDay, "h", base.Format("20060102")),
+	} {
+		if got := tallies[string(key)]; len(got) != 1 || got[0].Visits != 1 {
+			t.Errorf("%q = %+v, want one visit", key, got)
 		}
 	}
 }

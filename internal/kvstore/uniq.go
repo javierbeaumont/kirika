@@ -34,16 +34,17 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-// The precision of a sketch: 2^12 registers, a standard error of about 1.6%, in at most 4 KB.
+// The precision of a sketch: 2^12 registers, a standard error of about 1.6%, in at most about 4 KB.
 const hllPrecision = 12
 
 // The size in bytes of a year's key.
 const yearKeyLen = 32
 
-// A sketch's class, host and YYYYMM month.
+// A sketch's class, host, YYYYMM month and that month's year.
 type sketchID struct {
 	class       class
 	host, month string
+	year        int
 }
 
 var (
@@ -67,8 +68,8 @@ func uniqKey(host, ym string, cl class) []byte {
 }
 
 // Adds a client to the batch's unique visitors of a host, month and class.
-func (b *Batch) addUnique(host, month string, trafficClass class, client string) {
-	id := sketchID{trafficClass, host, month}
+func (b *Batch) addUnique(host, month string, year int, trafficClass class, client string) {
+	id := sketchID{trafficClass, host, month, year}
 
 	clients := b.uniques[id]
 	if clients == nil {
@@ -104,20 +105,19 @@ func writeUnique(sketches, keys *bolt.Bucket, uniques map[sketchID]map[string]bo
 	var sum [sha256.Size]byte
 
 	for id, clients := range uniques {
-		year := yearOf(id.month)
-		if year <= lastClosed {
+		if id.year <= lastClosed {
 			continue
 		}
 
-		mac := macs[year]
+		mac := macs[id.year]
 		if mac == nil {
-			key, err := yearKey(keys, strconv.Itoa(year))
+			key, err := yearKey(keys, strconv.Itoa(id.year))
 			if err != nil {
 				return err
 			}
 
 			mac = hmac.New(sha256.New, key)
-			macs[year] = mac
+			macs[id.year] = mac
 		}
 
 		sketch := newSketch()
@@ -148,13 +148,6 @@ func writeUnique(sketches, keys *bolt.Bucket, uniques map[sketchID]map[string]bo
 	}
 
 	return nil
-}
-
-// Returns the year of a YYYYMM month: all but its last two digits, as a year can have five.
-func yearOf(month string) int {
-	year, _ := strconv.Atoi(month[:len(month)-2]) // a batch's months are digits
-
-	return year
 }
 
 // Returns the last closed year, or -1 while none is: a page in the store's zone can be of the year 0.

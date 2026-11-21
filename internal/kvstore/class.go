@@ -25,7 +25,7 @@ import "errors"
 const (
 	groupCorrect = iota // a valid status code
 	groupOther          // the rest of 1xx, 2xx and 3xx, such as redirects
-	groupError          // 4xx, 5xx, no status and 600-999
+	groupError          // the rest: 4xx, 5xx, no status and 600-999
 	groupCount
 )
 

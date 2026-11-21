@@ -23,8 +23,10 @@ package kvstore
 
 import (
 	"bytes"
+	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/javierbeaumont/kirika/internal/logparse"
 )
@@ -39,8 +41,8 @@ func clientCounts(batch *Batch) map[string]uint64 {
 	return out
 }
 
-// A client counts once, from its first page, in the sketch of its host in any case, its month and its class. A request
-// with no page or no client adds nothing.
+// A client counts once in the sketch of its host in any letter case, its month and its class. A request with no page or
+// no client adds nothing.
 func TestUnique(t *testing.T) {
 	next := base.AddDate(0, 1, 0)
 
@@ -160,8 +162,8 @@ func TestLoadSketchCopies(t *testing.T) {
 	}
 }
 
-// Each byte of a sparse and a dense sketch is altered, and whatever loadSketch accepts is merged: a fault inside the
-// library would stop the process, past what a test or recover can catch.
+// Each byte of a sparse and a dense sketch is altered, and whatever loadSketch accepts merges and estimates without an
+// error or a fault.
 func TestLoadSketchCorrupt(t *testing.T) {
 	for _, b := range [][]byte{blob(t, hllPrecision, 100), blob(t, hllPrecision, 20000)} {
 		for i := range b {
@@ -182,11 +184,40 @@ func TestLoadSketchCorrupt(t *testing.T) {
 	}
 }
 
-// A month's year is all but its last two digits, five for the year 10000.
-func TestYearOf(t *testing.T) {
-	for month, want := range map[string]int{"200001": 2000, "100012": 1000, "1000001": 10000} {
-		if got := yearOf(month); got != want {
-			t.Errorf("yearOf(%q) = %d, want %d", month, got, want)
+// A day, an invalid period and an unknown filter value are errors.
+func TestUniqueErrors(t *testing.T) {
+	db := &DB{}
+
+	for _, tc := range []struct {
+		period string
+		filter Filter
+		want   error
+	}{
+		{"2000-01-01", Filter{}, errDayUnique},
+		{"2000/01", Filter{}, errBadPeriod},
+		{"2000", Filter{Status: AllStatuses + 1}, errBadFilter},
+	} {
+		if _, err := db.Unique(tc.period, tc.filter, "h"); !errors.Is(err, tc.want) {
+			t.Errorf("Unique(%q, %+v): err = %v, want %v", tc.period, tc.filter, err, tc.want)
 		}
+	}
+}
+
+// A client counts in the sketch of its page's month and year in the store's zone.
+func TestUniqueYear(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	newYear := base.AddDate(1, 0, 0).Add(-5 * time.Hour) // a new year in Kolkata, still the old one in UTC
+	batch := batchIn(loc, DefaultOptions())
+	batch.Apply(from("192.0.2.1", page("h", "/", 200, 1, newYear)))
+
+	local := newYear.In(loc)
+	want := sketchID{newClass(false, groupCorrect), "h", local.Format("200601"), local.Year()}
+
+	if _, ok := batch.uniques[want]; !ok || len(batch.uniques) != 1 {
+		t.Errorf("sketches %v, want only %+v", batch.uniques, want)
 	}
 }

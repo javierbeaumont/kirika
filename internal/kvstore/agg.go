@@ -171,8 +171,9 @@ func (db *DB) NewBatch(o Options) *Batch {
 // page if the path is one, and its size as bandwidth. A 206 that does not start at byte 0 adds its size but no hit, and
 // nothing when it has no body. A path and a referrer count without their fragment and query, and an index page under
 // its directory. A page also adds clientKey(event.ClientIP) to its month's unique visitors, and a correct one to the
-// client's visits. A missing status, referrer or client adds nothing there. The client kind is uaclass.Bot when the
-// path asks for robots.txt, else Unknown when the log carries no User-Agent.
+// client's visits. A missing status or referrer adds no value to its dimension, and a missing client no visitor or
+// visit. The client kind is uaclass.Bot when the path asks for robots.txt, else Unknown when the log carries no
+// User-Agent.
 func (b *Batch) Apply(event logparse.Event) {
 	host := hostKey(event.Host)
 	path := cutAt(event.Path, b.cut)
@@ -230,10 +231,12 @@ func (b *Batch) Apply(event logparse.Event) {
 		b.clientPages[localTime.Year()]++
 
 		visitor := clientKey(event.ClientIP)
-		b.addUnique(host, month, trafficClass, visitor)
+		b.addUnique(host, month, localTime.Year(), trafficClass, visitor)
 
 		if trafficClass.group() == groupCorrect {
-			b.events = append(b.events, sessEvent{trafficClass, host, visitor, clip(path), localTime})
+			b.events = append(b.events, sessEvent{
+				at: localTime, class: trafficClass, client: visitor, host: host, path: clip(path),
+			})
 		}
 	}
 }
@@ -339,7 +342,6 @@ func (db *DB) Flush(b *Batch) (closedYearPages int, err error) {
 					return err
 				}
 
-				// Only the stored counters change, so a failed flush leaves the batch as it was.
 				for _, e := range t {
 					stored = stored.add(e.class, e.Counts)
 				}
@@ -394,8 +396,8 @@ func compact(period string) (string, error) {
 	for _, l := range [...]struct{ in, out string }{
 		{"2006", "2006"}, {"2006-01", "200601"}, {"2006-01-02", "20060102"},
 	} {
-		if t, err := time.Parse(l.in, period); err == nil && len(period) == len(l.in) {
-			return t.Format(l.out), nil
+		if date, err := time.Parse(l.in, period); err == nil {
+			return date.Format(l.out), nil
 		}
 	}
 
@@ -471,8 +473,8 @@ func (db *DB) Series(host, tag, period string, f Filter) ([]TimePoint, error) {
 }
 
 // Dim returns a host's counters per value of a dimension tag over a period. Dimensions are kept per month, so a day
-// reads its whole month. A flush shows in all months of a year or in none. A value that counts nothing under f is left
-// out.
+// reads its whole month. A year reads its months in one transaction, so a flush shows in all of them or in none. A
+// value that counts nothing under f is left out.
 func (db *DB) Dim(host, tag, period string, f Filter) (map[string]Counts, error) {
 	date, err := checked(period, f)
 	if err != nil {

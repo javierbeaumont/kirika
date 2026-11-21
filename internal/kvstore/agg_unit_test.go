@@ -130,7 +130,7 @@ func TestApply(t *testing.T) {
 	}
 }
 
-// Checks the class each request is counted in, and its client kind.
+// Checks the class each request is counted in, its client kind and its status.
 func TestClasses(t *testing.T) {
 	withUserAgent := func(event logparse.Event, userAgent string) logparse.Event {
 		event.UserAgent = userAgent
@@ -347,7 +347,7 @@ func TestCheck(t *testing.T) {
 	}
 }
 
-// The valid codes are an option: with only 200, a 304 is another status.
+// The valid codes are an option: with only 200, a 304 is not correct.
 func TestValidCodes(t *testing.T) {
 	b := batchIn(time.UTC, Options{ValidCodes: []int{200}, VisitTimeout: DefaultVisitTimeout})
 	b.Apply(page("h", "/", 200, 1, base))
@@ -428,8 +428,8 @@ func TestReferrerQuery(t *testing.T) {
 	}
 }
 
-// A path and a referrer lose a fragment. A path loses it before it is told a page or an index page, and a referrer left
-// empty counts nothing.
+// A path and a referrer lose a fragment. A path loses it before it is checked for a page or an index page, and a
+// referrer left empty counts nothing.
 func TestFragment(t *testing.T) {
 	month := base.Format("200601")
 	css := page("h", "/app.css#v1", 200, 1, base)
@@ -449,8 +449,8 @@ func TestFragment(t *testing.T) {
 	}
 }
 
-// A query starts only at "?" by default, and also at an added separator. A path loses its query before it is told a
-// page, an index page or robots.txt.
+// A query starts only at "?" by default, and also at an added separator. A path loses its query before it is checked
+// for a page, an index page or robots.txt.
 func TestQuerySeparators(t *testing.T) {
 	ym := base.Format("200601")
 	ev := page("h", "/app;s=1", 200, 1, base)
@@ -644,5 +644,40 @@ func TestPrefixEnd(t *testing.T) {
 		if got := string(prefixEnd(in)); got != want || string(in) != prefix {
 			t.Errorf("prefixEnd(%q) = %q and the prefix %q; want %q and the prefix unchanged", prefix, got, in, want)
 		}
+	}
+}
+
+// Each read refuses a period that is not a year, a month or a day.
+func TestBadPeriod(t *testing.T) {
+	db := &DB{}
+	period := "2000-13"
+
+	if _, err := db.Totals("h", period, Filter{}); !errors.Is(err, errBadPeriod) {
+		t.Errorf("Totals(%q): err = %v, want errBadPeriod", period, err)
+	}
+
+	if _, err := db.Series("h", tagDay, period, Filter{}); !errors.Is(err, errBadPeriod) {
+		t.Errorf("Series(%q): err = %v, want errBadPeriod", period, err)
+	}
+
+	if _, err := db.Dim("h", tagURL, period, Filter{}); !errors.Is(err, errBadPeriod) {
+		t.Errorf("Dim(%q): err = %v, want errBadPeriod", period, err)
+	}
+}
+
+func TestBadFilter(t *testing.T) {
+	db := &DB{}
+	bad := Filter{Kind: FileKind + 1}
+
+	if _, err := db.Totals("h", "2000", bad); !errors.Is(err, errBadFilter) {
+		t.Errorf("Totals: err = %v, want errBadFilter", err)
+	}
+
+	if _, err := db.Series("h", tagDay, "2000", bad); !errors.Is(err, errBadFilter) {
+		t.Errorf("Series: err = %v, want errBadFilter", err)
+	}
+
+	if _, err := db.Dim("h", tagURL, "2000", bad); !errors.Is(err, errBadFilter) {
+		t.Errorf("Dim: err = %v, want errBadFilter", err)
 	}
 }
