@@ -30,10 +30,12 @@ const (
 	Unknown = "unknown"
 )
 
-// Substrings common to crawlers and automated clients.
+// Substrings common to crawlers and automated clients. java and python are AWStats' robots of those names:
+// https://github.com/eldy/AWStats/blob/AWSTATS_8_0/wwwroot/cgi-bin/lib/robots.pm#L797
+// https://github.com/eldy/AWStats/blob/AWSTATS_8_0/wwwroot/cgi-bin/lib/robots.pm#L1307
 var botMarkers = []string{
-	"bingpreview", "bot", "crawl", "curl", "facebookexternalhit", "feedfetcher", "go-http-client", "httpclient",
-	"libwww", "mediapartners", "monitor", "python-requests", "scrapy", "slurp", "spider", "wget",
+	"bingpreview", "bot", "crawl", "curl", "facebookexternalhit", "feedfetcher", "go-http-client", "httpclient", "java",
+	"libwww", "mediapartners", "monitor", "python", "scrapy", "slurp", "spider", "wget",
 }
 
 // Substrings common to handheld devices.

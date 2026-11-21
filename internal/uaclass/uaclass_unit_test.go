@@ -31,6 +31,7 @@ func TestClassify(t *testing.T) {
 		{"", Bot},
 		{" \t", Bot},
 		{"CURL/8.7.1", Bot},
+		{"Java-http-client/17.0.2", Bot},
 		{"Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", Bot},
 		{"Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 " +
 			"Safari/604.1", Mobile},
@@ -44,6 +45,7 @@ func TestClassify(t *testing.T) {
 			"Safari/605.1.15", Desktop},
 		{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 " +
 			"Safari/537.36", Desktop},
+		{"Python/3.12 aiohttp/3.9.5", Bot},
 	} {
 		if got := Classify(tc.ua); got != tc.want {
 			t.Errorf("Classify(%q) = %q, want %q", tc.ua, got, tc.want)
@@ -51,7 +53,7 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// Every marker, in any case, decides its kind on its own, and a bot marker wins over every mobile one.
+// Every marker, in upper case, decides its kind on its own, and a bot marker wins over every mobile one.
 func TestClassifyMarkers(t *testing.T) {
 	for kind, markers := range map[string][]string{Bot: botMarkers, Mobile: mobileMarkers} {
 		for _, m := range markers {
@@ -70,7 +72,7 @@ func TestClassifyMarkers(t *testing.T) {
 	}
 }
 
-// Each list stays lowercase, sorted and free of duplicates.
+// Each list holds non-empty lowercase markers, sorted and free of duplicates.
 func TestMarkerLists(t *testing.T) {
 	for name, markers := range map[string][]string{"botMarkers": botMarkers, "mobileMarkers": mobileMarkers} {
 		for i, m := range markers {
