@@ -67,7 +67,8 @@ const DefaultVisitTimeout = time.Hour
 // Options are the counting rules of a batch.
 type Options struct {
 	IndexPages      []string      // file names of a directory's index page
-	NotPages        []string      // extensions never counted as pages, besides the image and download types
+	NotPages        []string      // extensions not counted as pages, besides the file types
+	Pages           []string      // extensions counted as pages, even file types or NotPages
 	QuerySeparators string        // characters besides "?" that start the query of a path or a referrer
 	ValidCodes      []int         // the status codes of a correct request
 	VisitTimeout    time.Duration // the longest gap between two pages of one visit
@@ -77,7 +78,6 @@ type Options struct {
 func DefaultOptions() Options {
 	return Options{
 		IndexPages:   slices.Clone(defaultIndexPages),
-		NotPages:     slices.Clone(defaultNotPages),
 		ValidCodes:   []int{http.StatusOK, http.StatusPartialContent, http.StatusNotModified},
 		VisitTimeout: DefaultVisitTimeout,
 	}
@@ -86,13 +86,13 @@ func DefaultOptions() Options {
 // Batch holds in memory what applied events add and the log states set on it, until DB.Flush writes them in one
 // transaction.
 type Batch struct {
+	cut        string // "#" and "?", which end a path (RFC 3986, section 3.3), and the query separators
 	d          map[string]tally
 	events     []sessEvent // in log order
 	index      []string    // "/" and an index page name each
 	loc        *time.Location
 	newestPage time.Time // in the store's zone
 	notPage    map[string]bool
-	query      string              // "?", which starts a query (RFC 3986, section 3.4), and the query separators
 	state      map[string]LogState // by log path
 	timeout    time.Duration
 	uniques    map[sketchID]map[string]bool // the clients of each sketch
@@ -120,10 +120,10 @@ func (db *DB) NewBatch(o Options) *Batch {
 	}
 
 	b := &Batch{
+		cut:       "#?" + o.QuerySeparators,
 		d:         map[string]tally{},
 		loc:       db.loc,
-		notPage:   setOf(o.NotPages...),
-		query:     "?" + o.QuerySeparators,
+		notPage:   notPageSet(o.NotPages, o.Pages),
 		state:     map[string]LogState{},
 		timeout:   o.VisitTimeout,
 		uniques:   map[sketchID]map[string]bool{},
@@ -144,13 +144,13 @@ func (db *DB) NewBatch(o Options) *Batch {
 
 // Apply counts one event in its class: in its hour, its day and each dimension of hostKey(event.Host). It adds a hit, a
 // page if the path is one, and its size as bandwidth. A 206 that does not start at byte 0 adds its size but no hit. A
-// path and a referrer count without their query, and an index page under its directory. A page also adds
+// path and a referrer count without their fragment and query, and an index page under its directory. A page also adds
 // clientKey(event.ClientIP) to its month's unique visitors, and a correct one to the client's visits. A missing status,
 // referrer or client adds nothing there. The client kind is uaclass.Bot when the path asks for robots.txt, else Unknown
 // when the log carries no User-Agent.
 func (b *Batch) Apply(event logparse.Event) {
 	host := hostKey(event.Host)
-	path := cutQuery(event.Path, b.query)
+	path := cutAt(event.Path, b.cut)
 
 	clientKind := uaclass.Unknown
 	if event.HasUserAgent {
@@ -185,7 +185,7 @@ func (b *Batch) Apply(event logparse.Event) {
 		b.add(dimKey(tagStat, host, month, strconv.Itoa(event.Status)), trafficClass, counts)
 	}
 
-	if referrer := cutQuery(event.Referer, b.query); referrer != "" {
+	if referrer := cutAt(event.Referer, b.cut); referrer != "" {
 		b.add(dimKey(tagRef, host, month, clip(referrer)), trafficClass, counts)
 	}
 

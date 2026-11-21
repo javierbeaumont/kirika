@@ -339,6 +339,20 @@ func TestIndexPages(t *testing.T) {
 	}
 }
 
+// A batch counts a NotPages type as a file and a Pages type as a page.
+func TestPageLists(t *testing.T) {
+	options := DefaultOptions()
+	options.NotPages, options.Pages = []string{"action"}, []string{"json"}
+	batch := batchIn(time.UTC, options)
+	batch.Apply(page("h", "/save.action", 200, 1, base))
+	batch.Apply(page("h", "/data.json", 200, 1, base))
+
+	want := map[string]Counts{"/data.json": pageCounts(1, 1), "/save.action": {HitBandwidth: 1, Hits: 1}}
+	if got := counted(batch, encKey(tagURL, "h", base.Format("200601")), Filter{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("paths = %+v, want %+v", got, want)
+	}
+}
+
 // A referrer counts without its query, and not at all when nothing else is left.
 func TestReferrerQuery(t *testing.T) {
 	var evs []logparse.Event
@@ -353,6 +367,27 @@ func TestReferrerQuery(t *testing.T) {
 
 	want := map[string]Counts{"https://r.example/p": pageCounts(2, 2)}
 	if got := counted(b, encKey(tagRef, "h", base.Format("200601")), Filter{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("referrers = %+v, want %+v", got, want)
+	}
+}
+
+// A path and a referrer lose a fragment. A path loses it before it is told a page or an index page, and a referrer left
+// empty counts nothing.
+func TestFragment(t *testing.T) {
+	month := base.Format("200601")
+	css := page("h", "/app.css#v1", 200, 1, base)
+	css.Referer = "#top"
+	section := page("h", "/page#section-2", 200, 1, base)
+	section.Referer = "https://r.example/p#top-1"
+	batch := applied(css, section, page("h", "/index.html#top", 200, 1, base))
+
+	want := map[string]Counts{"/": pageCounts(1, 1), "/app.css": {HitBandwidth: 1, Hits: 1}, "/page": pageCounts(1, 1)}
+	if got := counted(batch, encKey(tagURL, "h", month), Filter{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("paths = %+v, want %+v", got, want)
+	}
+
+	want = map[string]Counts{"https://r.example/p": pageCounts(1, 1)}
+	if got := counted(batch, encKey(tagRef, "h", month), Filter{}); !reflect.DeepEqual(got, want) {
 		t.Errorf("referrers = %+v, want %+v", got, want)
 	}
 }

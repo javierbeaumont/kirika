@@ -19,38 +19,51 @@
 
 package kvstore
 
-import "strings"
+import (
+	"maps"
+	"strings"
+	"unicode"
+)
 
 // The default file names of an index page. The list is the DefaultFile of AWStats' sample configuration:
 // https://github.com/eldy/AWStats/blob/AWSTATS_8_0/wwwroot/cgi-bin/awstats.model.conf#L465-L470
 var defaultIndexPages = []string{"index.html", "index.php"}
 
-// The default extensions that are never pages: styles, scripts, fonts, feeds, applets and images. The list is AWStats'
-// default NotPageList: https://github.com/eldy/AWStats/blob/AWSTATS_8_0/wwwroot/cgi-bin/awstats.pl#L1849-L1868
-var defaultNotPages = []string{
-	"bmp", "class", "css", "eot", "gif", "ico", "jpeg", "jpg", "js", "png", "rss", "swf", "webp", "woff", "woff2",
-	"xml",
-}
-
-// The extensions of images and downloads: a request for one is never a page. The list is AWStats':
-// https://github.com/eldy/AWStats/blob/AWSTATS_8_0/wwwroot/cgi-bin/lib/mime.pm#L63-L72
+// The extensions of files: AWStats' file types and the files it leaves untyped, plus current formats and what scanners
+// probe for. AWStats' are in: https://github.com/eldy/AWStats/blob/AWSTATS_8_0/wwwroot/cgi-bin/awstats.pl#L1849-L1868
+// https://github.com/eldy/AWStats/blob/AWSTATS_8_0/wwwroot/cgi-bin/lib/mime.pm#L74-L266
 var fileTypes = setOf(
-	"7z", "aac", "ace", "ai", "apk", "asf", "avi", "azw", "azw3", "bin", "bmp", "bz2", "cab", "cdr", "csv", "deb",
-	"divx", "dmg", "doc", "docx", "emz", "epub", "f4v", "flac", "flv", "frl", "gif", "gpx", "gz", "heic", "ico", "iso",
-	"jar", "jpeg", "jpg", "kml", "kmz", "lit", "log", "lzma", "m3u", "m4a", "m4v", "mdb", "mkv", "mobi", "mov", "mp3",
-	"mp4", "mpeg", "mpg", "msi", "mso", "odb", "odf", "odg", "odm", "odp", "ods", "odt", "oga", "ogg", "ogv", "ogx",
-	"otg", "oth", "otp", "ots", "ott", "ova", "ovf", "oxt", "pdf", "pkg", "png", "pps", "ppt", "pptx", "psd", "qcow2",
-	"qt", "rar", "raw", "rm", "rpt", "rtf", "svg", "svgz", "sxc", "sxd", "sxg", "sxi", "sxm", "sxw", "tar", "tbz2",
-	"tgz", "tif", "tiff", "toast", "txt", "vcd", "vdi", "vhdx", "vmdk", "vpc", "wav", "webm", "webp", "wma", "wmf",
-	"wmv", "wmz", "xls", "xlsx", "xsl", "xz", "z", "zip",
+	"7z", "aac", "ace", "ai", "apk", "appimage", "asc", "asf", "atom", "avi", "avif", "azw", "azw3", "bak", "bin",
+	"bmp", "bz2", "cab", "cdr", "cf", "class", "conf", "css", "csv", "deb", "divx", "dll", "dmg", "doc", "docx", "dtd",
+	"emz", "env", "eot", "epub", "exe", "f4v", "flac", "flatpak", "flatpakref", "flv", "fon", "frl", "gif", "gpg",
+	"gpx", "gz", "heic", "htaccess", "htpasswd", "ico", "img", "ini", "iso", "jar", "jnlp", "jpeg", "jpg", "js", "json",
+	"kml", "kmz", "lit", "log", "lzma", "m3u", "m3u8", "m4a", "m4v", "map", "md5", "mdb", "mjs", "mkv", "mobi", "mov",
+	"mp3", "mp4", "mpeg", "mpg", "msi", "mso", "odb", "odf", "odg", "odm", "odp", "ods", "odt", "oga", "ogg", "ogv",
+	"ogx", "otf", "otg", "oth", "otp", "ots", "ott", "ova", "ovf", "oxt", "pdf", "pgp", "pkg", "png", "pps", "ppt",
+	"pptx", "psd", "qcow2", "qt", "rar", "raw", "rm", "rpm", "rpt", "rss", "rtf", "sha1", "sha256", "sha512", "sig",
+	"snap", "sql", "svg", "svgz", "swf", "sxc", "sxd", "sxg", "sxi", "sxm", "sxw", "tar", "tbz2", "tgz", "tif", "tiff",
+	"toast", "torrent", "ts", "ttf", "txt", "vcd", "vdi", "vhdx", "vmdk", "vpc", "wasm", "wav", "webm", "webmanifest",
+	"webp", "wma", "wmf", "wmv", "wmz", "woff", "woff2", "xls", "xlsx", "xml", "xsl", "xz", "yaml", "yml", "z", "zip",
+	"zst",
 )
 
-// Reports whether a request path is a page: it has no extension, or one that is neither in notPage nor an image or
-// download type.
+// Returns the extensions that are never pages: the file types and notPages, without pages.
+func notPageSet(notPages, pages []string) map[string]bool {
+	set := maps.Clone(fileTypes)
+	maps.Copy(set, setOf(notPages...))
+
+	for entry := range setOf(pages...) {
+		delete(set, entry)
+	}
+
+	return set
+}
+
+// Reports whether a request path is a page: it has no extension, or one not in notPage.
 func isPage(path string, notPage map[string]bool) bool {
 	ext := extension(path)
 
-	return ext == "" || !notPage[ext] && !fileTypes[ext]
+	return ext == "" || !notPage[ext]
 }
 
 // Returns path cut to its directory when it ends in one of suffixes, "/" and an index page name each.
@@ -64,26 +77,25 @@ func fold(path string, suffixes []string) string {
 	return path
 }
 
-// Returns s up to its query, which starts at the first of seps.
-func cutQuery(s, seps string) string {
-	if i := strings.IndexAny(s, seps); i >= 0 {
-		return s[:i]
+// Returns value up to the first of chars, or whole without any.
+func cutAt(value, chars string) string {
+	if i := strings.IndexAny(value, chars); i >= 0 {
+		return value[:i]
 	}
 
-	return s
+	return value
 }
 
-// Returns the extension of a path in lowercase: the 1 to 6 letters, digits or underscores after its last dot. Anything
-// else there means the path has none. The rule follows AWStats:
-// https://github.com/eldy/AWStats/blob/AWSTATS_8_0/wwwroot/cgi-bin/awstats.pl#L18529
+// Returns the extension of a path in lowercase: the word characters of any script after its last dot. Anything else
+// there, such as a byte that is not UTF-8, means the path has none.
 func extension(path string) string {
 	dot := strings.LastIndexByte(path, '.')
-	if dot < 0 || len(path)-dot-1 > 6 {
+	if dot < 0 {
 		return ""
 	}
 
-	for i := dot + 1; i < len(path); i++ {
-		if !wordByte(path[i]) {
+	for _, char := range path[dot+1:] {
+		if !wordRune(char) {
 			return ""
 		}
 	}
@@ -91,9 +103,10 @@ func extension(path string) string {
 	return strings.ToLower(path[dot+1:])
 }
 
-// Reports whether c is an ASCII letter, a digit or an underscore.
-func wordByte(c byte) bool {
-	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '_'
+// Reports whether char is a word character, as Perl's \w defines it for Unicode.
+func wordRune(char rune) bool {
+	return unicode.In(char, unicode.Letter, unicode.Mark, unicode.Digit, unicode.Nl, unicode.Pc,
+		unicode.Other_Alphabetic, unicode.Join_Control)
 }
 
 // Returns the set of the given strings in lowercase.
