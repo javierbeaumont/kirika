@@ -51,6 +51,7 @@ var (
 var (
 	errLocalZone = errors.New("kvstore: Local and localtime are each run's zone; " +
 		"a store needs a named one, such as Europe/Madrid")
+	errNotStore      = errors.New("kvstore: not a kirika store: it holds buckets but no schema version")
 	errSchemaCorrupt = errors.New("kvstore: corrupt schema version")
 	errSchemaNewer   = errors.New("kvstore: store schema is newer than this build")
 	errZone          = errors.New("kvstore: the store keeps another time zone")
@@ -63,13 +64,52 @@ type DB struct {
 	salt []byte         // the key of its session IDs
 }
 
-// Open opens the store at path, creating it if missing. timeout bounds the wait for another process to release the file
-// (0 waits forever). zone names the time zone of its hours, days and months, such as America/New_York. When empty, it
-// is the zone the store keeps or, for a new store, the system's, else UTC. A store written by a newer build or with a
-// corrupt schema version or salt is refused, and so is a zone the system does not know, other than the stored one, or
-// that is each run's: Local, and localtime, which Debian links to /etc/localtime.
+// Open opens the store at path, creating it if missing. timeout bounds each wait for another process to release the
+// file, one to read it and one to write it (0 waits forever). zone names the time zone of its hours, days and months,
+// such as America/New_York. When empty, it is the zone the store keeps or, for a new store, the system's, else UTC. A
+// file with buckets but no schema version, such as another program's, is refused before anything is written, and so is
+// a store written by a newer build or with a corrupt schema version. A corrupt salt is refused too, and so is a zone
+// the system does not know, other than the stored one, or that is each run's: Local, and localtime, which Debian links
+// to /etc/localtime.
 func Open(path string, timeout time.Duration, zone string) (*DB, error) {
-	b, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: timeout})
+	if err := probe(path, timeout); err != nil {
+		return nil, err
+	}
+
+	file, err := openFile(path, &bolt.Options{Timeout: timeout})
+	if err != nil {
+		return nil, err
+	}
+
+	db := &DB{b: file}
+	if err := db.init(zone); err != nil {
+		_ = file.Close()
+
+		return nil, err
+	}
+
+	return db, nil
+}
+
+// Returns why Open refuses the file at path, opened only to read: bbolt writes to some files it opens to write, such as
+// one saved without its free-page list. A path that is missing or cannot be stat'ed, or an empty file, is left to the
+// open that writes.
+func probe(path string, timeout time.Duration) error {
+	if info, err := os.Stat(path); err != nil || info.Size() == 0 {
+		return nil
+	}
+
+	file, err := openFile(path, &bolt.Options{ReadOnly: true, Timeout: timeout})
+	if err != nil {
+		return err
+	}
+
+	return errors.Join(file.View(checkSchema), file.Close())
+}
+
+// Opens the bbolt file at path with options.
+func openFile(path string, options *bolt.Options) (*bolt.DB, error) {
+	file, err := bolt.Open(path, 0o600, options)
 	if errors.Is(err, berrors.ErrTimeout) {
 		return nil, fmt.Errorf("kvstore: open %s: another process holds it: %w", path, err)
 	}
@@ -78,14 +118,7 @@ func Open(path string, timeout time.Duration, zone string) (*DB, error) {
 		return nil, fmt.Errorf("kvstore: open %s: %w", path, err)
 	}
 
-	db := &DB{b: b}
-	if err := db.init(zone); err != nil {
-		_ = b.Close()
-
-		return nil, err
-	}
-
-	return db, nil
+	return file, nil
 }
 
 // Zone returns the name of the store's time zone.
@@ -98,29 +131,25 @@ func (db *DB) Close() error {
 	return db.b.Close()
 }
 
-// Creates the buckets and writes the schema version, the time zone and the salt, or checks the stored ones.
+// Checks the schema version, then creates the missing buckets and writes the schema version, the time zone and the
+// salt, or checks the stored ones.
 func (db *DB) init(zone string) error {
 	return db.b.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bktAgg, bktKeys, bktSess, bktState, bktUniq} {
+		if err := checkSchema(tx); err != nil {
+			return err
+		}
+
+		for _, name := range [][]byte{bktAgg, bktKeys, bktMeta, bktSess, bktState, bktUniq} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
 		}
 
-		meta, err := tx.CreateBucketIfNotExists(bktMeta)
-		if err != nil {
-			return err
-		}
-
-		switch v := meta.Get(metaSchema); {
-		case v == nil:
+		meta := tx.Bucket(bktMeta)
+		if meta.Get(metaSchema) == nil {
 			if err := meta.Put(metaSchema, []byte{schemaVersion}); err != nil {
 				return err
 			}
-		case len(v) != 1 || v[0] == 0:
-			return fmt.Errorf("%w: %q", errSchemaCorrupt, v)
-		case v[0] > schemaVersion:
-			return fmt.Errorf("%w: v%d > v%d; upgrade kirika", errSchemaNewer, v[0], schemaVersion)
 		}
 
 		stored := string(meta.Get(metaZone))
@@ -152,6 +181,28 @@ func (db *DB) init(zone string) error {
 
 		return db.loadSalt(meta)
 	})
+}
+
+// Returns why Open refuses the file tx reads, if it does: buckets but no schema version, or a corrupt or newer one. A
+// file with no bucket is a new store.
+func checkSchema(tx *bolt.Tx) error {
+	var version []byte
+	if meta := tx.Bucket(bktMeta); meta != nil {
+		version = meta.Get(metaSchema)
+	}
+
+	switch {
+	case version == nil:
+		if bucket, _ := tx.Cursor().First(); bucket != nil {
+			return errNotStore
+		}
+	case len(version) != 1 || version[0] == 0:
+		return fmt.Errorf("%w: %q", errSchemaCorrupt, version)
+	case version[0] > schemaVersion:
+		return fmt.Errorf("%w: v%d > v%d; upgrade kirika", errSchemaNewer, version[0], schemaVersion)
+	}
+
+	return nil
 }
 
 // Returns the name of the system's time zone. TZ names it when set, an empty one meaning UTC; a leading ":" is dropped,

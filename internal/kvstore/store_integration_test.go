@@ -33,25 +33,47 @@ import (
 	berrors "go.etcd.io/bbolt/errors"
 )
 
-// Writes a raw meta value under key into the store at path.
-func setMeta(t *testing.T, path string, key, v []byte) {
+// Runs update in one transaction on the bbolt file at path, created if missing, opened with options.
+func updateFile(t *testing.T, path string, options *bolt.Options, update func(*bolt.Tx) error) {
 	t.Helper()
 
-	b, err := bolt.Open(path, 0o600, nil)
+	file, err := bolt.Open(path, 0o600, options)
 	if err != nil {
 		t.Fatalf("bolt open: %v", err)
 	}
 
-	err = b.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bktMeta).Put(key, v)
-	})
-	if err != nil {
-		t.Fatalf("set %s: %v", key, err)
+	if err := file.Update(update); err != nil {
+		t.Fatalf("update %s: %v", filepath.Base(path), err)
 	}
 
-	if err := b.Close(); err != nil {
+	if err := file.Close(); err != nil {
 		t.Fatalf("bolt close: %v", err)
 	}
+}
+
+// Fails the test unless the file at path opens to write, as when no process holds its lock.
+func checkUnlocked(t *testing.T, path string) {
+	t.Helper()
+
+	file, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Errorf("open %s to write: %v", filepath.Base(path), err)
+
+		return
+	}
+
+	if err := file.Close(); err != nil {
+		t.Errorf("bolt close: %v", err)
+	}
+}
+
+// Writes a raw meta value under key into the store at path.
+func setMeta(t *testing.T, path string, key, v []byte) {
+	t.Helper()
+
+	updateFile(t, path, nil, func(tx *bolt.Tx) error {
+		return tx.Bucket(bktMeta).Put(key, v)
+	})
 }
 
 // Closes db, failing the test on error.
@@ -131,6 +153,7 @@ func TestOpenErrors(t *testing.T) {
 	}
 }
 
+// Open waits no longer than its timeout for a file held to write or to read.
 func TestOpenLocked(t *testing.T) {
 	path := storePath(t)
 
@@ -140,10 +163,23 @@ func TestOpenLocked(t *testing.T) {
 	}
 
 	if _, err := Open(path, 50*time.Millisecond, "UTC"); !errors.Is(err, berrors.ErrTimeout) {
-		t.Errorf("second open: err = %v, want the lock timeout", err)
+		t.Errorf("open of a store held to write: err = %v, want the lock timeout", err)
 	}
 
 	closeStore(t, db)
+
+	reader, err := bolt.Open(path, 0o600, &bolt.Options{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("bolt open to read: %v", err)
+	}
+
+	if _, err := Open(path, 50*time.Millisecond, "UTC"); !errors.Is(err, berrors.ErrTimeout) {
+		t.Errorf("open of a store held to read: err = %v, want the lock timeout", err)
+	}
+
+	if err := reader.Close(); err != nil {
+		t.Fatalf("bolt close: %v", err)
+	}
 
 	db, err = Open(path, time.Second, "UTC")
 	if err != nil {
@@ -167,16 +203,130 @@ func TestOpenSchema(t *testing.T) {
 		path := storePath(t)
 		setMeta(t, path, metaSchema, tc.v)
 
-		for _, timeout := range []time.Duration{time.Second, 50 * time.Millisecond} {
-			db, err := Open(path, timeout, "UTC")
-			if err == nil {
-				closeStore(t, db)
+		db, err := Open(path, time.Second, "UTC")
+		if err == nil {
+			closeStore(t, db)
+		}
+
+		if !errors.Is(err, tc.want) {
+			t.Errorf("schema %q: err = %v, want %v", tc.v, err, tc.want)
+		}
+
+		checkUnlocked(t, path)
+	}
+}
+
+// A file with buckets but no schema version, such as another program's, is refused and left as it was, even one saved
+// without its free-page list, which bbolt writes to when it opens it to write. A refused file releases its lock.
+func TestOpenNotStore(t *testing.T) {
+	dir := t.TempDir()
+	foreign := filepath.Join(dir, "other.db")
+	noFreelist := filepath.Join(dir, "no-freelist.db")
+
+	for path, options := range map[string]*bolt.Options{foreign: nil, noFreelist: {NoFreelistSync: true}} {
+		updateFile(t, path, options, func(tx *bolt.Tx) error {
+			bucket, err := tx.CreateBucket([]byte("other"))
+			if err != nil {
+				return err
 			}
 
-			if !errors.Is(err, tc.want) {
-				t.Errorf("schema %q, timeout %v: err = %v, want %v", tc.v, timeout, err, tc.want)
-			}
+			return bucket.Put([]byte("key"), []byte("value"))
+		})
+	}
+
+	noSchema := storePath(t)
+	updateFile(t, noSchema, nil, func(tx *bolt.Tx) error {
+		return tx.Bucket(bktMeta).Delete(metaSchema)
+	})
+
+	for _, path := range []string{foreign, noFreelist, noSchema} {
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read: %v", err)
 		}
+
+		db, err := Open(path, time.Second, "UTC")
+		if err == nil {
+			closeStore(t, db)
+		}
+
+		if !errors.Is(err, errNotStore) {
+			t.Errorf("Open(%s): err = %v, want %v", filepath.Base(path), err, errNotStore)
+		}
+
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+
+		if !bytes.Equal(after, before) {
+			t.Errorf("Open(%s) changed the file", filepath.Base(path))
+		}
+
+		checkUnlocked(t, path)
+	}
+}
+
+// init refuses what probe refuses, as the file may change between the two opens.
+func TestInitRefuses(t *testing.T) {
+	foreign := filepath.Join(t.TempDir(), "other.db")
+	updateFile(t, foreign, nil, func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucket([]byte("other"))
+
+		return err
+	})
+
+	newer := storePath(t)
+	setMeta(t, newer, metaSchema, []byte{schemaVersion + 1})
+
+	for path, want := range map[string]error{foreign: errNotStore, newer: errSchemaNewer} {
+		file, err := bolt.Open(path, 0o600, nil)
+		if err != nil {
+			t.Fatalf("bolt open: %v", err)
+		}
+
+		if err := (&DB{b: file}).init("UTC"); !errors.Is(err, want) {
+			t.Errorf("init(%s): err = %v, want %v", filepath.Base(path), err, want)
+		}
+
+		if err := file.Close(); err != nil {
+			t.Fatalf("bolt close: %v", err)
+		}
+	}
+}
+
+// A file with no bucket, even an empty one, becomes a new store.
+func TestOpenEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.db")
+	noBucket := filepath.Join(dir, "no-bucket.db")
+
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	updateFile(t, noBucket, nil, func(*bolt.Tx) error { return nil })
+
+	for _, path := range []string{empty, noBucket} {
+		db, err := Open(path, time.Second, "UTC")
+		if err != nil {
+			t.Errorf("Open(%s): %v", filepath.Base(path), err)
+
+			continue
+		}
+
+		err = db.b.View(func(tx *bolt.Tx) error {
+			if version := tx.Bucket(bktMeta).Get(metaSchema); !bytes.Equal(version, []byte{schemaVersion}) {
+				t.Errorf("Open(%s): schema = %x, want %x", filepath.Base(path), version, schemaVersion)
+			}
+
+			return nil
+		})
+		if err != nil {
+			t.Errorf("view: %v", err)
+		}
+
+		closeStore(t, db)
 	}
 }
 
