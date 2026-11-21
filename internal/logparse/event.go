@@ -24,6 +24,7 @@ package logparse
 import (
 	"errors"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -31,17 +32,15 @@ import (
 // Event is one normalized access-log record. Fields kirika does not use are dropped.
 type Event struct {
 	ClientIP     string    // client address, without a port
-	FirstPart    bool      // a partial response known to start at byte 0
-	HasUserAgent bool      // the log carries a User-Agent field, empty or not
-	Host         string    // vhost, without port 80 or 443 (e.g. "example.com", "example.com:8080")
+	FirstPart    bool      // the range sent, or else the first one asked for, starts at byte 0
+	HasUserAgent bool      // the log carries a User-Agent, empty or not
+	Host         string    // vhost as VHost returns it
 	Method       string    // HTTP method (GET, POST, ...)
 	Path         string    // URI without its query string, with unreserved characters decoded
-	Proto        string    // e.g. "HTTP/1.1"
 	Referer      string    // Referer header
 	Size         int64     // response size in bytes as the log counts it, never negative
 	Status       int       // HTTP status code, 100-999, or 0 when the log has none
 	Time         time.Time // request time, UTC, in years 1-9999
-	URI          string    // raw request target, query string included
 	UserAgent    string    // User-Agent header
 }
 
@@ -76,6 +75,28 @@ func unbracket(s string) string {
 	}
 
 	return s
+}
+
+// VHost returns a host without a name's final dot and without an empty or default port, 80 or 443. Any other port
+// stays, since it usually serves another site, and a valid one loses its leading zeros. An IPv6 address left without a
+// port loses its brackets.
+func VHost(host string) string {
+	name, port, err := net.SplitHostPort(host)
+	if err != nil {
+		return unbracket(strings.TrimSuffix(host, "."))
+	}
+
+	name = strings.TrimSuffix(name, ".")
+	portNumber, err := strconv.ParseUint(port, 10, 16)
+
+	switch {
+	case port == "" || err == nil && (portNumber == 80 || portNumber == 443):
+		return name
+	case err == nil:
+		return net.JoinHostPort(name, strconv.FormatUint(portNumber, 10))
+	default:
+		return net.JoinHostPort(name, port)
+	}
 }
 
 // Decodes the percent-encoded unreserved characters of a path: letters, digits and "-._~" mean the same either way (RFC

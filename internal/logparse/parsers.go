@@ -25,7 +25,7 @@ import "fmt"
 // value: a line holds a client address.
 type Parser func(line []byte) (Event, error)
 
-// ByName returns the parser registered under a log-format name.
+// ByName returns the parser of a log-format name.
 func ByName(name string) (Parser, error) {
 	switch name {
 	case "caddy-json":

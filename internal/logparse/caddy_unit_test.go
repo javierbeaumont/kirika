@@ -60,8 +60,7 @@ func TestParseCaddyJSONClientIP(t *testing.T) {
 	}
 }
 
-// Each error names the field it refused or says the line is not a JSON object, and quotes neither a value nor a
-// header's name.
+// Each error names the field it refused, if any, and quotes neither a value nor a header's name.
 func TestParseCaddyJSONErrors(t *testing.T) {
 	const wrongTs = "caddy: ts is missing or outside years 1970-9999"
 
@@ -91,6 +90,7 @@ func TestParseCaddyJSONErrors(t *testing.T) {
 			[]byte(`{"logger":1,"ts":946684800,"request":{"method":"GET","uri":"/"}}`),
 			"caddy: logger has the wrong type",
 		},
+		{[]byte(`{"ts":946684800,"request":5}`), "caddy: request has the wrong type"},
 		{caddyRequest(`"client_ip":192`), "caddy: request.client_ip has the wrong type"},
 		{caddyRequest(`"headers":{"X-192.0.2.1":"v"}`), "caddy: request.headers has the wrong type"},
 		{
@@ -152,58 +152,62 @@ func TestParseCaddyJSONFixture(t *testing.T) {
 	}
 
 	events := make([]Event, len(lines))
-	for i, l := range lines {
-		ev, err := ParseCaddyJSON(l)
+	for i, line := range lines {
+		event, err := ParseCaddyJSON(line)
 		if err != nil {
-			t.Fatalf("line %d: unexpected error: %v", i, err)
+			t.Fatalf("line %d: parse: %v", i, err)
 		}
 
-		events[i] = ev
+		events[i] = event
 	}
 
 	// Fields shared by every fixture line.
-	for i, ev := range events {
-		if ev.ClientIP != "172.18.0.1" {
-			t.Errorf("line %d: ClientIP = %q, want 172.18.0.1", i, ev.ClientIP)
+	for i, event := range events {
+		if event.ClientIP != "172.18.0.1" {
+			t.Errorf("line %d: ClientIP = %q, want 172.18.0.1", i, event.ClientIP)
 		}
 
-		if ev.Host != "localhost:8080" {
-			t.Errorf("line %d: Host = %q, want localhost:8080", i, ev.Host)
+		if event.Host != "localhost:8080" {
+			t.Errorf("line %d: Host = %q, want localhost:8080", i, event.Host)
 		}
 
-		if ev.Proto != "HTTP/1.1" {
-			t.Errorf("line %d: Proto = %q, want HTTP/1.1", i, ev.Proto)
+		if event.Size != 33 {
+			t.Errorf("line %d: Size = %d, want 33", i, event.Size)
 		}
 
-		if ev.Size != 33 {
-			t.Errorf("line %d: Size = %d, want 33", i, ev.Size)
+		if event.Status != 200 {
+			t.Errorf("line %d: Status = %d, want 200", i, event.Status)
 		}
 
-		if ev.Status != 200 {
-			t.Errorf("line %d: Status = %d, want 200", i, ev.Status)
-		}
-
-		if ev.Time.Year() != 2000 {
-			t.Errorf("line %d: Time.Year() = %d, want 2000", i, ev.Time.Year())
+		if event.Time.Year() != 2000 {
+			t.Errorf("line %d: Time.Year() = %d, want 2000", i, event.Time.Year())
 		}
 	}
 
 	// Line 0: GET / with curl UA, no referer.
-	if got := events[0]; got.Method != "GET" || got.Path != "/" || got.Referer != "" || got.URI != "/" ||
-		got.UserAgent != "curl/8.7.1" {
+	if got := events[0]; got.Method != "GET" || got.Path != "/" || got.Referer != "" || got.UserAgent != "curl/8.7.1" {
 		t.Errorf("line 0 mismatch: %+v", got)
 	}
 
 	// Line 1: GET with query string, custom UA and a referer.
 	if got := events[1]; got.Method != "GET" || got.Path != "/blog/post-1" ||
-		got.Referer != "https://ref.example/page" || got.URI != "/blog/post-1?utm=x" ||
-		got.UserAgent != "kirika-test-agent/1.0" {
+		got.Referer != "https://ref.example/page" || got.UserAgent != "kirika-test-agent/1.0" {
 		t.Errorf("line 1 mismatch: %+v", got)
 	}
 
 	// Line 2: POST /api/submit.
 	if got := events[2]; got.Method != "POST" || got.Path != "/api/submit" {
 		t.Errorf("line 2 mismatch: %+v", got)
+	}
+}
+
+// The spelling that sorts first wins, whatever order the map gives.
+func TestHeaderFirstOrder(t *testing.T) {
+	headers := map[string][]string{"REFERER": {"a"}, "Referer": {"b"}, "referer": {"c"}}
+	for range 100 {
+		if got := headerFirst(headers, "Referer"); got != "a" {
+			t.Fatalf("headerFirst = %q, want a", got)
+		}
 	}
 }
 
@@ -226,7 +230,7 @@ func TestParseCaddyJSONHeaders(t *testing.T) {
 	}
 }
 
-// A line carries a User-Agent, even empty, only when its log keeps the request headers.
+// A line carries a User-Agent, even empty, exactly when it holds the request headers.
 func TestParseCaddyJSONHasUserAgent(t *testing.T) {
 	for _, tc := range []struct {
 		fields string
@@ -308,32 +312,12 @@ func TestParseCaddyJSONRangeFixture(t *testing.T) {
 	}
 }
 
-// VHost drops a default or empty port, the brackets of an IPv6 address left without one, and the leading zeros of a
-// valid port; caddy-json applies it to the Host header.
-func TestVHost(t *testing.T) {
+// caddy-json applies VHost to the Host header.
+func TestParseCaddyJSONHost(t *testing.T) {
 	for _, tc := range []struct{ host, want string }{
-		{"", ""},
-		{"::1", "::1"},
-		{"[::1]", "::1"},
-		{"[::1]:443", "::1"},
 		{"[::1]:8080", "[::1]:8080"},
-		{"[::1]:08080", "[::1]:8080"},
-		{"example.com", "example.com"},
-		{"example.com:", "example.com"},
-		{"example.com:80", "example.com"},
-		{"example.com:080", "example.com"},
-		{"example.com:443", "example.com"},
-		{"example.com:0443", "example.com"},
-		{"example.com:8443", "example.com:8443"},
-		{"example.com:08443", "example.com:8443"},
-		{"example.com:http", "example.com:http"},
-		{"example.com:+80", "example.com:+80"},
-		{"example.com:070000", "example.com:070000"},
+		{"example.com.:443", "example.com"},
 	} {
-		if got := VHost(tc.host); got != tc.want {
-			t.Errorf("VHost(%q) = %q, want %q", tc.host, got, tc.want)
-		}
-
 		got, err := ParseCaddyJSON(caddyRequest(fmt.Sprintf(`"host":%q`, tc.host)))
 		if err != nil {
 			t.Fatalf("host %q: parse: %v", tc.host, err)
@@ -360,14 +344,14 @@ func TestParseCaddyJSONPath(t *testing.T) {
 			t.Fatalf("uri %q: parse: %v", tc.uri, err)
 		}
 
-		if got.Path != tc.want || got.URI != tc.uri {
-			t.Errorf("uri %q: Path/URI = %q/%q, want %q/%q", tc.uri, got.Path, got.URI, tc.want, tc.uri)
+		if got.Path != tc.want {
+			t.Errorf("uri %q: Path = %q, want %q", tc.uri, got.Path, tc.want)
 		}
 	}
 }
 
-// The bounds of every checked field are accepted.
-func TestParseCaddyJSONRanges(t *testing.T) {
+// The last second of year 9999 and the bounds of status and size are accepted.
+func TestParseCaddyJSONBounds(t *testing.T) {
 	for _, tc := range []struct {
 		ts, status, size string
 		wantStatus       int

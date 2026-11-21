@@ -47,6 +47,7 @@ func TestUnreserved(t *testing.T) {
 		"/a/b":                      "/a/b",
 		"%7E/%7e":                   "~/~",
 		"/%41%5A%61%7A%30%39":       "/AZaz09",
+		"/%4a%5f":                   "/J_",
 		"/%2D%2E%5F":                "/-._",
 		"/%40%5B%60%7B%2F%3A%20%E2": "/%40%5B%60%7B%2F%3A%20%E2",
 		"/%":                        "/%",
@@ -55,6 +56,41 @@ func TestUnreserved(t *testing.T) {
 	} {
 		if got := unreserved(in); got != want {
 			t.Errorf("unreserved(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// VHost drops a default or empty port, a name's final dot, the brackets of an IPv6 address left without a port, and the
+// leading zeros of a valid port.
+func TestVHost(t *testing.T) {
+	for _, tc := range []struct{ host, want string }{
+		{"", ""},
+		{".", ""},
+		{"::1", "::1"},
+		{"[::1]", "::1"},
+		{"[::1].", "::1"},
+		{"[::1]:443", "::1"},
+		{"[::1]:8080", "[::1]:8080"},
+		{"[::1]:08080", "[::1]:8080"},
+		{"[::1]:http", "[::1]:http"},
+		{"example.com", "example.com"},
+		{"example.com.", "example.com"},
+		{"example.com.:443", "example.com"},
+		{"example.com.:8443", "example.com:8443"},
+		{"example.com.:http", "example.com:http"},
+		{"example.com:", "example.com"},
+		{"example.com:80", "example.com"},
+		{"example.com:080", "example.com"},
+		{"example.com:443", "example.com"},
+		{"example.com:0443", "example.com"},
+		{"example.com:8443", "example.com:8443"},
+		{"example.com:08443", "example.com:8443"},
+		{"example.com:http", "example.com:http"},
+		{"example.com:+80", "example.com:+80"},
+		{"example.com:070000", "example.com:070000"},
+	} {
+		if got := VHost(tc.host); got != tc.want {
+			t.Errorf("VHost(%q) = %q, want %q", tc.host, got, tc.want)
 		}
 	}
 }

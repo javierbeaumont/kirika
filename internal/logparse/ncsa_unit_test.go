@@ -46,7 +46,7 @@ func TestParseNCSACombined(t *testing.T) {
 		t.Errorf("Host = %q, want empty (NCSA has no vhost)", got.Host)
 	}
 
-	if got.Method != "GET" || got.Path != "/blog/post-1" || got.Proto != "HTTP/1.1" || got.URI != "/blog/post-1?utm=x" {
+	if got.Method != "GET" || got.Path != "/blog/post-1" {
 		t.Errorf("request parse mismatch: %+v", got)
 	}
 
@@ -64,17 +64,15 @@ func TestParseNCSACombined(t *testing.T) {
 	}
 }
 
-// A client loses its port and a path its encoded unreserved characters.
+// A client loses its port and a path's unreserved characters are decoded.
 func TestParseNCSANormalized(t *testing.T) {
 	got, err := ParseNCSA([]byte(`203.0.113.5:4711 - - [01/Jan/2000:00:00:00 +0000] "GET /%7Ea?%7E HTTP/1.1" 200 1`))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 
-	want := Event{ClientIP: "203.0.113.5", Path: "/~a", URI: "/%7Ea?%7E"}
-	if got.ClientIP != want.ClientIP || got.Path != want.Path || got.URI != want.URI {
-		t.Errorf("ClientIP, Path, URI = %q, %q, %q; want %q, %q, %q", got.ClientIP, got.Path, got.URI, want.ClientIP,
-			want.Path, want.URI)
+	if got.ClientIP != "203.0.113.5" || got.Path != "/~a" {
+		t.Errorf("ClientIP, Path = %q, %q; want 203.0.113.5, /~a", got.ClientIP, got.Path)
 	}
 }
 
@@ -104,7 +102,7 @@ func TestParseNCSACommon(t *testing.T) {
 // Each error names the field it refused, never its value, and the offset where the scan stopped if it could not delimit
 // the field.
 func TestParseNCSAErrors(t *testing.T) {
-	const req = `192.0.2.1 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1"`
+	const prefix = `192.0.2.1 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1"`
 
 	for _, tc := range []struct{ line, want string }{
 		{"", "ncsa: client is missing at offset 0"},
@@ -115,22 +113,25 @@ func TestParseNCSAErrors(t *testing.T) {
 		{`192.0.2.1 - - [not a time] "GET / HTTP/1.1" 200 1`, "ncsa: time is invalid"},
 		{`192.0.2.1 - - [01/Jan/2000:00:59:61 +0100] "GET / HTTP/1.1" 200 1`, "ncsa: time is invalid"},
 		{`192.0.2.1 - - [01/Jan/0001:00:00:00 +0100] "GET / HTTP/1.1" 200 1`, "ncsa: time is outside years 1-9999"},
+		{`192.0.2.1 - - [31/Dec/9999:23:59:59 -0100] "GET / HTTP/1.1" 200 1`, "ncsa: time is outside years 1-9999"},
 		{`192.0.2.1 - - [01/Jan/2000:00:00:00 +0000] GET / 200 1`, "ncsa: request is not quoted at offset 43"},
-		{req[:len(req)-1] + ` 200 1`, "ncsa: request has no closing quote at offset 64"},
-		{req, "ncsa: status is missing at offset 59"},
-		{req + ` 20x 1`, "ncsa: status is not a number"},
-		{req + ` -200 1`, "ncsa: status is not a number"},
-		{req + ` +200 1`, "ncsa: status is not a number"},
-		{req + ` 70000 1`, "ncsa: status is out of range"},
-		{req + ` 99 1`, "ncsa: status is not a three-digit code"},
-		{req + ` 1000 1`, "ncsa: status is not a three-digit code"},
-		{req + ` 200`, "ncsa: size is missing at offset 63"},
-		{req + ` 200 abc`, "ncsa: size is not a number"},
-		{req + ` 200 -1`, "ncsa: size is not a number"},
-		{req + ` 200 +1`, "ncsa: size is not a number"},
-		{req + ` 200 9223372036854775808`, "ncsa: size is out of range"},
-		{req + ` 200 1 "https://r.example`, "ncsa: referer has no closing quote at offset 84"},
-		{req + ` 200 1 "-" "Mozilla`, "ncsa: user agent has no closing quote at offset 78"},
+		{prefix[:len(prefix)-1] + ` 200 1`, "ncsa: request has no closing quote at offset 64"},
+		{prefix, "ncsa: status is missing at offset 59"},
+		{prefix + ` 20x 1`, "ncsa: status is not a number"},
+		{prefix + ` -200 1`, "ncsa: status is not a number"},
+		{prefix + ` +200 1`, "ncsa: status is not a number"},
+		{prefix + ` 70000 1`, "ncsa: status is out of range"},
+		{prefix + ` 99 1`, "ncsa: status is not a three-digit code"},
+		{prefix + ` 1000 1`, "ncsa: status is not a three-digit code"},
+		{prefix + ` 200`, "ncsa: size is missing at offset 63"},
+		{prefix + ` 200 abc`, "ncsa: size is not a number"},
+		{prefix + ` 200 -1`, "ncsa: size is not a number"},
+		{prefix + ` 200 +1`, "ncsa: size is not a number"},
+		{prefix + ` 200 9223372036854775808`, "ncsa: size is out of range"},
+		{prefix + ` 200 1 "https://r.example`, "ncsa: referer has no closing quote at offset 84"},
+		{prefix + ` 200 1 "-" "Mozilla`, "ncsa: user agent has no closing quote at offset 78"},
+		{prefix + ` 200 1 "-" "ua\x4`, "ncsa: user agent has no closing quote at offset 76"},
+		{prefix + ` 200 1 "-" "ua\`, "ncsa: user agent has no closing quote at offset 74"},
 	} {
 		if _, err := ParseNCSA([]byte(tc.line)); err == nil || err.Error() != tc.want {
 			t.Errorf("ParseNCSA(%q): err = %v, want %q", tc.line, err, tc.want)
@@ -164,23 +165,27 @@ func TestParseNCSAFixture(t *testing.T) {
 	}
 
 	events := make([]Event, len(lines))
-	for i, l := range lines {
-		ev, err := ParseNCSA(l)
+	for i, line := range lines {
+		event, err := ParseNCSA(line)
 		if err != nil {
-			t.Fatalf("line %d: unexpected error: %v", i, err)
+			t.Fatalf("line %d: parse: %v", i, err)
 		}
 
-		events[i] = ev
+		events[i] = event
 	}
 
 	// Fields shared by every fixture line.
-	for i, ev := range events {
-		if ev.ClientIP != "172.18.0.1" {
-			t.Errorf("line %d: ClientIP = %q, want 172.18.0.1", i, ev.ClientIP)
+	for i, event := range events {
+		if event.ClientIP != "172.18.0.1" {
+			t.Errorf("line %d: ClientIP = %q, want 172.18.0.1", i, event.ClientIP)
 		}
 
-		if ev.Host != "" {
-			t.Errorf("line %d: Host = %q, want empty (no vhost in NCSA)", i, ev.Host)
+		if event.Host != "" {
+			t.Errorf("line %d: Host = %q, want empty (no vhost in NCSA)", i, event.Host)
+		}
+
+		if !event.Time.Equal(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)) {
+			t.Errorf("line %d: Time = %v, want 2000-01-01", i, event.Time)
 		}
 	}
 
@@ -192,11 +197,11 @@ func TestParseNCSAFixture(t *testing.T) {
 
 	// Line 1: query stripped, real referer and UA.
 	if got := events[1]; got.Path != "/blog/post-1" || got.Referer != "https://ref.example/page" ||
-		got.URI != "/blog/post-1?utm=x" || got.UserAgent != "Mozilla/5.0 (X11; Linux x86_64)" {
+		got.UserAgent != "Mozilla/5.0 (X11; Linux x86_64)" {
 		t.Errorf("line 1 mismatch: %+v", got)
 	}
 
-	// Line 2: 404, referer "-" normalised to "".
+	// Line 2: 404, no referer.
 	if got := events[2]; got.Path != "/missing" || got.Referer != "" || got.Status != 404 {
 		t.Errorf("line 2 mismatch: %+v", got)
 	}
@@ -242,21 +247,23 @@ func TestParseNCSANoValue(t *testing.T) {
 }
 
 func TestParseNCSARequestLine(t *testing.T) {
-	for _, tc := range []struct{ req, method, uri, proto string }{
-		{"", "", "", ""},
-		{"GET /", "GET", "/", ""},
-		{"GET /a?b HTTP/1.1", "GET", "/a?b", "HTTP/1.1"},
+	for _, tc := range []struct{ request, method, path string }{
+		{"", "", ""},
+		{" GET  /a  HTTP/1.1", "GET", "/a"},
+		{"GET", "GET", ""},
+		{"GET /", "GET", "/"},
+		{"GET /a?b HTTP/1.1", "GET", "/a"},
 	} {
-		line := fmt.Sprintf(`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] %q 200 1`, tc.req)
+		line := fmt.Sprintf(`1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] %q 200 1`, tc.request)
 
 		got, err := ParseNCSA([]byte(line))
 		if err != nil {
-			t.Fatalf("request %q: parse: %v", tc.req, err)
+			t.Fatalf("request %q: parse: %v", tc.request, err)
 		}
 
-		if got.Method != tc.method || got.Proto != tc.proto || got.URI != tc.uri {
-			t.Errorf("request %q: method/uri/proto = %q/%q/%q, want %q/%q/%q", tc.req, got.Method, got.URI, got.Proto,
-				tc.method, tc.uri, tc.proto)
+		if got.Method != tc.method || got.Path != tc.path {
+			t.Errorf("request %q: method/path = %q/%q, want %q/%q", tc.request, got.Method, got.Path, tc.method,
+				tc.path)
 		}
 	}
 }
@@ -296,6 +303,7 @@ func TestParseNCSAEscapes(t *testing.T) {
 		{`ni\xC3\xb1o`, "ni\xc3\xb1o"},
 		{`\xZZ`, "xZZ"},
 		{`end\x4`, "endx4"},
+		{`C:\\dev`, `C:\dev`},
 	} {
 		line := `1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1 "-" "` + tc.field + `"`
 
@@ -310,7 +318,7 @@ func TestParseNCSAEscapes(t *testing.T) {
 	}
 }
 
-// Checks the optional and extra fields around the request.
+// Checks the optional referer and user agent, the spaces before them and a field after them.
 func TestParseNCSAFields(t *testing.T) {
 	const prefix = `1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1`
 
@@ -334,21 +342,21 @@ func TestParseNCSAFields(t *testing.T) {
 	}
 }
 
-// The bounds of the status and size fields are accepted.
-func TestParseNCSARanges(t *testing.T) {
+// The bounds of the time, status and size fields are accepted.
+func TestParseNCSABounds(t *testing.T) {
 	for _, tc := range []struct {
-		status, size string
-		wantStatus   int
-		wantSize     int64
+		time, status, size string
+		wantStatus         int
+		wantSize           int64
 	}{
-		{"100", "0", 100, 0},
-		{"999", "9223372036854775807", 999, 9223372036854775807},
+		{"01/Jan/0001:00:00:00 +0000", "100", "0", 100, 0},
+		{"31/Dec/9999:23:59:59 +0000", "999", "9223372036854775807", 999, 9223372036854775807},
 	} {
-		line := `1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" ` + tc.status + " " + tc.size
+		line := `1.2.3.4 - - [` + tc.time + `] "GET / HTTP/1.1" ` + tc.status + " " + tc.size
 
 		got, err := ParseNCSA([]byte(line))
 		if err != nil {
-			t.Fatalf("status %s, size %s: parse: %v", tc.status, tc.size, err)
+			t.Fatalf("time %s, status %s, size %s: parse: %v", tc.time, tc.status, tc.size, err)
 		}
 
 		if got.Status != tc.wantStatus || got.Size != tc.wantSize {
@@ -364,6 +372,7 @@ func TestParseVHostCombined(t *testing.T) {
 		"2001:db8::1:80":    "2001:db8::1",
 		"2001:db8::1:8080":  "[2001:db8::1]:8080",
 		"[2001:db8::1]:443": "2001:db8::1",
+		"example.com.:80":   "example.com",
 		"example.com:443":   "example.com",
 		"example.com:80":    "example.com",
 		"example.com:8080":  "example.com:8080",

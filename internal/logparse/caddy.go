@@ -23,8 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -36,7 +34,7 @@ const maxTs = 253402300800
 // line that decodes but has no request method, such as a server-startup line.
 var ErrNotAccessLog = errors.New("logparse: not a caddy access-log entry")
 
-// The subset of Caddy's JSON access-log schema that kirika consumes. Unknown fields are ignored by encoding/json.
+// The subset of Caddy's JSON access-log schema that kirika consumes.
 type caddyLine struct {
 	Logger  string `json:"logger"`
 	Request struct {
@@ -44,7 +42,6 @@ type caddyLine struct {
 		Headers  map[string][]string `json:"headers"`
 		Host     string              `json:"host"`
 		Method   string              `json:"method"`
-		Proto    string              `json:"proto"`
 		RemoteIP string              `json:"remote_ip"`
 		URI      string              `json:"uri"`
 	} `json:"request"`
@@ -90,12 +87,10 @@ func ParseCaddyJSON(line []byte) (Event, error) {
 		Host:         VHost(entry.Request.Host),
 		Method:       entry.Request.Method,
 		Path:         unreserved(stripQuery(entry.Request.URI)),
-		Proto:        entry.Request.Proto,
 		Referer:      headerFirst(headers, "Referer"),
 		Size:         entry.Size,
 		Status:       entry.Status,
 		Time:         unixFloat(entry.Ts),
-		URI:          entry.Request.URI,
 		UserAgent:    headerFirst(headers, "User-Agent"),
 	}
 	if err := event.check(); err != nil {
@@ -157,27 +152,6 @@ func headerFirst(h map[string][]string, name string) string {
 	}
 
 	return h[key][0]
-}
-
-// VHost returns a host in the form Event.Host holds: without the default port of either scheme, 80 or 443, or an empty
-// one. Any other port stays, since it usually serves another site, and a valid one loses its leading zeros. An IPv6
-// address left without a port loses its brackets.
-func VHost(host string) string {
-	h, port, err := net.SplitHostPort(host)
-	if err != nil {
-		return unbracket(host)
-	}
-
-	n, err := strconv.ParseUint(port, 10, 16)
-
-	switch {
-	case port == "" || err == nil && (n == 80 || n == 443):
-		return h
-	case err == nil:
-		return net.JoinHostPort(h, strconv.FormatUint(n, 10))
-	default:
-		return host
-	}
 }
 
 // Returns the request target with any "?query" removed.

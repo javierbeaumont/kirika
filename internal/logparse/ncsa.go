@@ -34,10 +34,10 @@ const ncsaTime = "02/Jan/2006:15:04:05 -0700"
 // ParseNCSA parses one line of NCSA Common or Combined Log Format, as emitted by Apache, nginx (default), Lighttpd, and
 // OpenLiteSpeed:
 //
-//	host ident authuser [time] "request" status bytes ["referer" "user-agent"]
+//	client ident authuser [time] "request" status size ["referer" "user-agent"]
 //
-// The last two quoted fields (Combined) are optional, and fields after them are ignored. NCSA lines carry the client
-// host but no vhost, so Event.Host is left empty for the caller to fill.
+// The last two quoted fields (Combined) are optional, and fields after them are ignored. NCSA lines carry no vhost, so
+// Event.Host is left empty for the caller to fill.
 func ParseNCSA(line []byte) (Event, error) {
 	event, err := parseCLF(&clfScanner{s: string(line)})
 	if err != nil {
@@ -50,7 +50,7 @@ func ParseNCSA(line []byte) (Event, error) {
 // ParseVHostCombined parses one line of Apache's vhost_combined format, that of Debian's other_vhosts_access.log: the
 // vhost's name and canonical port, then a line ParseNCSA reads.
 //
-//	vhost:port host ident authuser [time] "request" status bytes ["referer" "user-agent"]
+//	vhost:port client ident authuser [time] "request" status size ["referer" "user-agent"]
 //
 // Event.Host is the vhost, as VHost returns it. A first field with no port, as an NCSA line's IPv4 or named client, is
 // an error.
@@ -102,8 +102,8 @@ func parseCLF(scanner *clfScanner) (Event, error) {
 
 	status := scanner.plain("status")
 	size := scanner.plain("size")
-	referer, _ := scanner.quote("referer")                 // Combined only
-	userAgent, hasUserAgent := scanner.quote("user agent") // Combined only
+	referer, _ := scanner.quote("referer")
+	userAgent, hasUserAgent := scanner.quote("user agent")
 
 	if scanner.err != nil {
 		return Event{}, scanner.err
@@ -123,17 +123,15 @@ func parseCLF(scanner *clfScanner) (Event, error) {
 		return Event{}, errors.New("time is invalid")
 	}
 
-	method, uri, proto := splitRequest(request)
+	method, target := splitRequest(request)
 
 	event := Event{
 		ClientIP:     clientAddr(client),
 		HasUserAgent: hasUserAgent,
 		Method:       method,
-		Path:         unreserved(stripQuery(uri)),
-		Proto:        proto,
+		Path:         unreserved(stripQuery(target)),
 		Referer:      referer,
 		Time:         requestTime.UTC(),
-		URI:          uri,
 		UserAgent:    userAgent,
 	}
 
@@ -172,7 +170,7 @@ func parseNCSATime(timestamp string) (time.Time, error) {
 	return time.Parse(ncsaTime, timestamp)
 }
 
-// Returns the error of a field that does not read as a number.
+// Returns the error of a numeric field that does not parse.
 func numberError(field string, err error) error {
 	if errors.Is(err, strconv.ErrRange) {
 		return fmt.Errorf("%s is out of range", field)
@@ -213,10 +211,10 @@ func (sc *clfScanner) bracket(field string) string {
 		return ""
 	}
 
-	val := sc.s[start:sc.i]
-	sc.i++ // consume ']'
+	value := sc.s[start:sc.i]
+	sc.i++
 
-	return val
+	return value
 }
 
 // Stops the scan at its first error, which names the field and the current offset.
@@ -284,9 +282,9 @@ func timeEnd(rest string) int {
 }
 
 // Reads a "..." field and decodes its escapes: \xHH is the byte HH (how Apache and nginx log non-printable bytes), and
-// a backslash before any other byte yields that byte. ok is false when the next field is not a quote (a Common-format
-// line has no referer/user-agent).
-func (sc *clfScanner) quote(field string) (string, bool) {
+// a backslash before any other byte yields that byte. quoted is false on an error or when no quoted field follows (a
+// Common-format line has no referer/user-agent).
+func (sc *clfScanner) quote(field string) (value string, quoted bool) {
 	if sc.err != nil {
 		return "", false
 	}
@@ -299,23 +297,23 @@ func (sc *clfScanner) quote(field string) (string, bool) {
 
 	sc.i++
 
-	var b strings.Builder
+	var decoded strings.Builder
 
 	for sc.i < len(sc.s) {
-		c := sc.s[sc.i]
+		char := sc.s[sc.i]
 		switch {
-		case c == '\\' && sc.i+3 < len(sc.s) && sc.s[sc.i+1] == 'x' && isHex(sc.s[sc.i+2]) && isHex(sc.s[sc.i+3]):
-			b.WriteByte(unhex(sc.s[sc.i+2])<<4 | unhex(sc.s[sc.i+3]))
+		case char == '\\' && sc.i+3 < len(sc.s) && sc.s[sc.i+1] == 'x' && isHex(sc.s[sc.i+2]) && isHex(sc.s[sc.i+3]):
+			decoded.WriteByte(unhex(sc.s[sc.i+2])<<4 | unhex(sc.s[sc.i+3]))
 
 			sc.i += 4
-		case c == '\\' && sc.i+1 < len(sc.s):
-			b.WriteByte(sc.s[sc.i+1])
+		case char == '\\' && sc.i+1 < len(sc.s):
+			decoded.WriteByte(sc.s[sc.i+1])
 			sc.i += 2
-		case c == '"':
+		case char == '"':
 			sc.i++
-			return b.String(), true
+			return decoded.String(), true
 		default:
-			b.WriteByte(c)
+			decoded.WriteByte(char)
 
 			sc.i++
 		}
@@ -347,21 +345,16 @@ func (sc *clfScanner) skipSpaces() {
 	}
 }
 
-// Splits a request line ("GET /path HTTP/1.1") into its parts, tolerating missing protocol (HTTP/0.9) or a blank
-// request.
-func splitRequest(req string) (method, uri, proto string) {
-	f := strings.Fields(req)
-	if len(f) > 0 {
-		method = f[0]
+// Splits a request line ("GET /path HTTP/1.1") into its method and target, each empty when missing.
+func splitRequest(request string) (method, target string) {
+	fields := strings.Fields(request)
+	if len(fields) > 0 {
+		method = fields[0]
 	}
 
-	if len(f) > 1 {
-		uri = f[1]
+	if len(fields) > 1 {
+		target = fields[1]
 	}
 
-	if len(f) > 2 {
-		proto = f[2]
-	}
-
-	return
+	return method, target
 }
