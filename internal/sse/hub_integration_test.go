@@ -24,6 +24,7 @@ package sse
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -31,33 +32,35 @@ import (
 	"time"
 )
 
-// Opens a stream from the server at url, failing the test unless it has the event stream's type and starts with an
-// update. It closes in the test's cleanup: a server closed earlier would wait for it.
-func get(t *testing.T, url string) *bufio.Reader {
+// A write timeout short enough for a test to leave a stream idle past it.
+const shortTimeout = 250 * time.Millisecond
+
+// Opens a stream from the server at url with client, failing the test unless it has the event stream's type and starts
+// with an update. Returns its response and a reader of the rest. It closes in the test's cleanup: a server closed
+// earlier would wait for it.
+func get(t *testing.T, client *http.Client, url string) (response *http.Response, reader *bufio.Reader) {
 	t.Helper()
 
-	client := &http.Client{Timeout: 5 * time.Second}
-
-	resp, err := client.Get(url)
+	response, err := client.Get(url)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
 
-	t.Cleanup(func() { _ = resp.Body.Close() })
+	t.Cleanup(func() { _ = response.Body.Close() })
 
-	if got := resp.Header.Get("Content-Type"); got != "text/event-stream" {
+	if got := response.Header.Get("Content-Type"); got != "text/event-stream" {
 		t.Errorf("Content-Type %q, want text/event-stream", got)
 	}
 
-	br := bufio.NewReader(resp.Body)
+	reader = bufio.NewReader(response.Body)
 
 	for _, want := range []string{"data: update\n", "\n"} {
-		if got, err := br.ReadString('\n'); got != want || err != nil {
+		if got, err := reader.ReadString('\n'); got != want || err != nil {
 			t.Fatalf("read %q, %v; want %q", got, err, want)
 		}
 	}
 
-	return br
+	return response, reader
 }
 
 // Over HTTP, a client of the stream gets an update at once and another after a broadcast.
@@ -67,33 +70,70 @@ func TestServeHTTP(t *testing.T) {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
-	br := get(t, srv.URL)
+	_, reader := get(t, &http.Client{Timeout: 5 * time.Second}, srv.URL)
 
 	h.Broadcast()
 
-	if got, err := br.ReadString('\n'); got != "data: update\n" || err != nil {
+	if got, err := reader.ReadString('\n'); got != "data: update\n" || err != nil {
 		t.Errorf("read after a broadcast %q, %v; want an update", got, err)
 	}
 }
 
-// http.Server.Shutdown ends an open stream once Close is registered with it.
+// Starts a server of hub over HTTP/1.1, or HTTP/2 with TLS, and returns it with a client. Its Shutdown closes hub.
+func start(t *testing.T, hub *Hub, major int) (server *httptest.Server, client *http.Client) {
+	t.Helper()
+
+	server = httptest.NewUnstartedServer(hub)
+	server.Config.RegisterOnShutdown(hub.Close)
+
+	if major == 2 {
+		server.EnableHTTP2 = true
+		server.StartTLS()
+	} else {
+		server.Start()
+	}
+
+	t.Cleanup(server.Close)
+
+	client = server.Client()
+	client.Timeout = 5 * time.Second
+
+	return server, client
+}
+
+// Over HTTP/1.1 and HTTP/2, http.Server.Shutdown ends an open stream once Close is registered with it, even one idle
+// past the write timeout.
 func TestShutdown(t *testing.T) {
-	h := NewHub(DefaultOptions())
+	for _, major := range []int{1, 2} {
+		for _, idle := range []time.Duration{0, 2 * shortTimeout} {
+			t.Run(fmt.Sprintf("HTTP%d idle %v", major, idle), func(t *testing.T) {
+				shutdownAfter(t, major, idle)
+			})
+		}
+	}
+}
 
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
+// Opens a stream over HTTP/major, leaves it idle for idle, shuts down the server and checks that the stream ends.
+func shutdownAfter(t *testing.T, major int, idle time.Duration) {
+	hub := NewHub(DefaultOptions())
+	hub.writeTimeout = shortTimeout
+	server, client := start(t, hub, major)
 
-	srv.Config.RegisterOnShutdown(h.Close)
-	br := get(t, srv.URL)
+	response, reader := get(t, client, server.URL)
+	if response.ProtoMajor != major {
+		t.Fatalf("protocol %s, want HTTP/%d", response.Proto, major)
+	}
+
+	time.Sleep(idle)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := srv.Config.Shutdown(ctx); err != nil {
+	if err := server.Config.Shutdown(ctx); err != nil {
 		t.Errorf("Shutdown: %v", err)
 	}
 
-	if rest, err := io.ReadAll(br); len(rest) != 0 || err != nil {
+	if rest, err := io.ReadAll(reader); len(rest) != 0 || err != nil {
 		t.Errorf("read after Shutdown %q, %v; want the end of the stream", rest, err)
 	}
 }

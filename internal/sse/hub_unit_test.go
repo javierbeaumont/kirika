@@ -32,16 +32,20 @@ import (
 	"time"
 )
 
-// A response writer that hands each flushed chunk to its channel and keeps the last write deadline. Setting a deadline,
-// writing or flushing fails once told to.
+// A response writer that hands each flushed chunk to its channel and keeps its write deadline: now, at its last flush,
+// and the one its last deadline replaced. Setting a deadline, writing, flushing or clearing the deadline fails once
+// told to.
 type stream struct {
-	header       http.Header
-	buf          bytes.Buffer
-	chunks       chan string
-	deadline     atomic.Int64 // in Unix nanoseconds
-	failDeadline atomic.Bool
-	failWrite    atomic.Bool
-	failFlush    atomic.Bool
+	header        http.Header
+	buf           bytes.Buffer
+	chunks        chan string
+	deadline      atomic.Int64 // in Unix nanoseconds, 0 when cleared
+	flushDeadline atomic.Int64
+	priorDeadline atomic.Int64
+	failDeadline  atomic.Bool
+	failWrite     atomic.Bool
+	failFlush     atomic.Bool
+	failClear     atomic.Bool
 }
 
 func newStream() *stream {
@@ -52,12 +56,17 @@ func (s *stream) Header() http.Header { return s.header }
 
 func (s *stream) WriteHeader(int) {}
 
-func (s *stream) SetWriteDeadline(d time.Time) error {
-	if s.failDeadline.Load() {
+func (s *stream) SetWriteDeadline(deadline time.Time) error {
+	switch {
+	case deadline.IsZero() && s.failClear.Load():
+		return errors.New("clear failed")
+	case deadline.IsZero():
+		s.deadline.Store(0)
+	case s.failDeadline.Load():
 		return errors.New("deadline failed")
+	default:
+		s.priorDeadline.Store(s.deadline.Swap(deadline.UnixNano()))
 	}
-
-	s.deadline.Store(d.UnixNano())
 
 	return nil
 }
@@ -74,6 +83,8 @@ func (s *stream) FlushError() error {
 	if s.failFlush.Load() {
 		return errors.New("flush failed")
 	}
+
+	s.flushDeadline.Store(s.deadline.Load())
 
 	s.chunks <- s.buf.String()
 
@@ -202,10 +213,16 @@ func TestBroadcast(t *testing.T) {
 	}
 }
 
-// A stream sends its headers and an update at once, under a write deadline, and another update after a broadcast. It
-// ends when its client leaves.
+// A stream sends its headers and an update at once, and another after a broadcast, each under a write deadline it
+// clears once flushed. It ends when its client leaves, with a deadline for the server's last write. Each deadline is
+// the hub's write timeout away, writeTimeout in a new hub.
 func TestServe(t *testing.T) {
 	h := NewHub(Options{Keepalive: time.Hour, MaxStreams: 1})
+	if h.writeTimeout != writeTimeout {
+		t.Errorf("write timeout of a new hub %v, want %v", h.writeTimeout, writeTimeout)
+	}
+
+	h.writeTimeout = time.Minute
 	s := newStream()
 	start := time.Now()
 	done, end := serve(h, s)
@@ -214,8 +231,9 @@ func TestServe(t *testing.T) {
 		t.Errorf("first chunk %q, want an update", got)
 	}
 
-	if d := time.Unix(0, s.deadline.Load()).Sub(start); d < writeTimeout || d > time.Since(start)+writeTimeout {
-		t.Errorf("write deadline %v after the start, want %v", d, writeTimeout)
+	fromStart := time.Unix(0, s.flushDeadline.Load()).Sub(start)
+	if fromStart < h.writeTimeout || fromStart > time.Since(start)+h.writeTimeout {
+		t.Errorf("write deadline %v after the start, want %v", fromStart, h.writeTimeout)
 	}
 
 	for key, want := range map[string]string{
@@ -226,17 +244,38 @@ func TestServe(t *testing.T) {
 		}
 	}
 
+	broadcast := time.Now()
+
 	h.Broadcast()
 
 	if got := next(t, s); got != "data: update\n\n" {
 		t.Errorf("chunk after a broadcast %q, want an update", got)
 	}
 
+	if prior := s.priorDeadline.Load(); prior != 0 {
+		t.Errorf("write deadline %v left set until the next send, want none", time.Unix(0, prior))
+	}
+
+	fromBroadcast := time.Unix(0, s.flushDeadline.Load()).Sub(broadcast)
+	if fromBroadcast < h.writeTimeout || fromBroadcast > time.Since(broadcast)+h.writeTimeout {
+		t.Errorf("write deadline %v after the broadcast, want %v", fromBroadcast, h.writeTimeout)
+	}
+
+	ended := time.Now()
+
 	end()
 	wait(t, done, "after the client left")
 
 	if n := open(h); n != 0 {
 		t.Errorf("%d streams open after the client left", n)
+	}
+
+	if prior := s.priorDeadline.Load(); prior != 0 {
+		t.Errorf("write deadline %v of the last send left set at the end, want none", time.Unix(0, prior))
+	}
+
+	if last := time.Unix(0, s.deadline.Load()); last.Sub(ended) < h.writeTimeout {
+		t.Errorf("write deadline %v at the end, want one %v after it", last, h.writeTimeout)
 	}
 }
 
@@ -258,9 +297,10 @@ func TestServeKeepalive(t *testing.T) {
 	}
 }
 
-// A stream ends when setting a deadline, a write or a flush fails, on its first update, a later one or a keepalive.
+// A stream ends when setting a deadline, writing, flushing or clearing the deadline fails, on its first update, a later
+// one or a keepalive.
 func TestServeFails(t *testing.T) {
-	for _, step := range []string{"deadline", "write", "flush"} {
+	for _, step := range []string{"deadline", "write", "flush", "clear"} {
 		for _, when := range []string{"start", "update", "keepalive"} {
 			h := NewHub(Options{Keepalive: time.Hour, MaxStreams: 1})
 			if when == "keepalive" {
@@ -269,7 +309,7 @@ func TestServeFails(t *testing.T) {
 
 			s := newStream()
 			fail := map[string]*atomic.Bool{
-				"deadline": &s.failDeadline, "write": &s.failWrite, "flush": &s.failFlush,
+				"deadline": &s.failDeadline, "write": &s.failWrite, "flush": &s.failFlush, "clear": &s.failClear,
 			}[step]
 			fail.Store(when == "start")
 

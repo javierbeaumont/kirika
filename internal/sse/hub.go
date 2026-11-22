@@ -47,9 +47,10 @@ func DefaultOptions() Options {
 
 // Hub sends an update to every open stream when told the data changed.
 type Hub struct {
-	opts Options
-	mu   sync.Mutex
-	subs map[chan struct{}]struct{} // nil once closed
+	mu           sync.Mutex
+	opts         Options
+	subs         map[chan struct{}]struct{} // nil once closed
+	writeTimeout time.Duration              // writeTimeout outside a test
 }
 
 // NewHub returns a hub with the limits of o. It panics if one is not positive.
@@ -61,7 +62,7 @@ func NewHub(o Options) *Hub {
 		panic(fmt.Sprintf("sse: max streams %d is not positive", o.MaxStreams))
 	}
 
-	return &Hub{opts: o, subs: map[chan struct{}]struct{}{}}
+	return &Hub{opts: o, subs: map[chan struct{}]struct{}{}, writeTimeout: writeTimeout}
 }
 
 // Broadcast tells every open stream that the data changed. It never blocks: a stream still waiting to send the last
@@ -115,8 +116,9 @@ func (h *Hub) unsubscribe(ch chan struct{}) {
 
 // ServeHTTP sends an update at once, for a client that reconnects, and another after each Broadcast, with a comment
 // every Options.Keepalive. It ends when the client leaves, a write fails or the hub closes. A closed or full hub
-// answers 503, and a method other than GET 405. Each write sets a deadline and flushes through http.ResponseController,
-// so a wrapper of the server's ResponseWriter needs an Unwrap method: without one, a stream ends at once.
+// answers 503, and a method other than GET 405. Each write sets a deadline, flushes and clears it through
+// http.ResponseController, so a wrapper of the server's ResponseWriter needs an Unwrap method: without one, a stream
+// ends at once.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -138,8 +140,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no") // else nginx holds the events in its buffer
 
 	controller := http.NewResponseController(w)
+	// The server's last write, which ends the response, has a deadline too.
+	defer func() { _ = controller.SetWriteDeadline(time.Now().Add(h.writeTimeout)) }()
+
 	send := func(message string) bool {
-		if controller.SetWriteDeadline(time.Now().Add(writeTimeout)) != nil {
+		if controller.SetWriteDeadline(time.Now().Add(h.writeTimeout)) != nil {
 			return false
 		}
 
@@ -147,7 +152,12 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return false
 		}
 
-		return controller.Flush() == nil
+		if controller.Flush() != nil {
+			return false
+		}
+
+		// Go's HTTP/2 server resets a stream whose deadline passes, even while it is idle.
+		return controller.SetWriteDeadline(time.Time{}) == nil
 	}
 
 	const update = "data: update\n\n"
