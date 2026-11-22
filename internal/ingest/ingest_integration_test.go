@@ -100,11 +100,11 @@ func appendLog(t *testing.T, path, text string) {
 	}
 }
 
-// Returns a reader of the NCSA log at path into db, with options, closed when the test ends.
-func newReader(t *testing.T, db *kvstore.DB, path string, options Options) *Reader {
+// Returns the reader New returns, closed when the test ends.
+func newReader(t *testing.T, db *kvstore.DB, path string, parse logparse.Parser, options Options) *Reader {
 	t.Helper()
 
-	logReader, err := New(db, path, logparse.ParseNCSA, options)
+	logReader, err := New(db, path, parse, options)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -126,7 +126,24 @@ func reader(t *testing.T, db *kvstore.DB, path string) *Reader {
 	options.DefaultHost = "h"
 	options.Now = func() time.Time { return base }
 
-	return newReader(t, db, path, options)
+	return newReader(t, db, path, logparse.ParseNCSA, options)
+}
+
+// Returns a reader as reader does, but parsing with parse and logging to logged at info level.
+func loggedReader(t *testing.T, db *kvstore.DB, path string, parse logparse.Parser, logged *bytes.Buffer) *Reader {
+	t.Helper()
+
+	options := DefaultOptions()
+	options.DefaultHost = "h"
+	options.Log = slog.New(slog.NewTextHandler(logged, nil))
+	options.Now = func() time.Time { return base }
+
+	return newReader(t, db, path, parse, options)
+}
+
+// Returns the logged warning that the log at path has no access line yet.
+func noAccessWarning(path string) string {
+	return `level=WARN msg="no access line yet, so each read starts the log over" path=` + path + "\n"
 }
 
 // Reads r, failing the test on error.
@@ -150,7 +167,7 @@ func TestClosedYearPages(t *testing.T) {
 
 	options := DefaultOptions()
 	options.Now = func() time.Time { return base.AddDate(1, 1, 0) }
-	logReader := newReader(t, db, path, options)
+	logReader := newReader(t, db, path, logparse.ParseNCSA, options)
 
 	if got := read(t, logReader); got != (Result{Counted: 4}) {
 		t.Errorf("Read = %+v, want 4 counted, no page of a closed year", got)
@@ -312,7 +329,7 @@ func TestReasons(t *testing.T) {
 	options.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	options.Now = func() time.Time { return base }
 
-	logReader := newReader(t, db, path, options)
+	logReader := newReader(t, db, path, logparse.ParseNCSA, options)
 
 	want := Result{Counted: 2, Blank: 1, Dropped: 1, Malformed: 1, Binary: 1, TooLong: 1, BadDate: 2}
 	if got := read(t, logReader); got != want {
@@ -355,7 +372,7 @@ func TestLineNumbers(t *testing.T) {
 	options.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	options.Now = func() time.Time { return base }
 
-	logReader := newReader(t, db, path, options)
+	logReader := newReader(t, db, path, logparse.ParseNCSA, options)
 
 	for _, tc := range []struct {
 		name, log         string
@@ -387,31 +404,36 @@ func TestLineNumbers(t *testing.T) {
 }
 
 // The first read of a path fails and writes nothing when it finds an unreadable line and none counted or dropped, and
-// its error names the first unreadable line and why. Blank lines are neither.
+// its error names the first unreadable line and why. Blank lines are neither: with only them, it warns.
 func TestFirstRead(t *testing.T) {
 	const refused = "ingest: no readable line in the first read of a log; "
 
 	for _, tc := range []struct {
 		name, log, err string
-		state          bool
+		state, warned  bool
 	}{
-		{"empty", "", "", false},
-		{"blank", "\n\n", "", false},
-		{"malformed", "\ngarbage\n\x00\n", refused + "line 2 is malformed: ncsa: ident is missing at offset 7", false},
-		{"binary", "\x00\n", refused + "line 1 is binary", false},
-		{"too long", strings.Repeat("x", maxLine+1) + "\n", refused + "line 1 is longer than 1 MiB", false},
+		{"empty", "", "", false, false},
+		{"blank", "\n\n", "", false, true},
+		{
+			"malformed", "\ngarbage\n\x00\n", refused + "line 2 is malformed: ncsa: ident is missing at offset 7",
+			false, false,
+		},
+		{"binary", "\x00\n", refused + "line 1 is binary", false, false},
+		{"too long", strings.Repeat("x", maxLine+1) + "\n", refused + "line 1 is longer than 1 MiB", false, false},
 		{
 			"dated ahead", ncsa("192.0.2.1", "GET", "/", base.Add(2*ahead)) + "\n",
-			refused + "line 1 is dated more than 24 hours ahead or before the year 1000", false,
+			refused + "line 1 is dated more than 24 hours ahead or before the year 1000", false, false,
 		},
-		{"malformed and a counted one", "garbage\n" + gets(0, 1), "", true},
-		{"malformed and a dropped one", "garbage\n" + ncsa("192.0.2.1", "TRACE", "/", base) + "\n", "", true},
+		{"malformed and a counted one", "garbage\n" + gets(0, 1), "", true, false},
+		{"malformed and a dropped one", "garbage\n" + ncsa("192.0.2.1", "TRACE", "/", base) + "\n", "", true, false},
 	} {
 		db := openStore(t)
 		path := filepath.Join(t.TempDir(), "access.log")
 		writeLog(t, path, tc.log)
 
-		_, err := reader(t, db, path).Read(t.Context())
+		var logged bytes.Buffer
+
+		_, err := loggedReader(t, db, path, logparse.ParseNCSA, &logged).Read(t.Context())
 		if got := fmt.Sprint(err); tc.err == "" && err != nil || tc.err != "" && (got != tc.err ||
 			!errors.Is(err, ErrUnreadable)) {
 			t.Errorf("%s: %v, want %q", tc.name, err, tc.err)
@@ -419,6 +441,10 @@ func TestFirstRead(t *testing.T) {
 
 		if _, ok, err := db.State(path); err != nil || ok != tc.state {
 			t.Errorf("%s: a state %v, %v; want %v", tc.name, ok, err, tc.state)
+		}
+
+		if warned := strings.Contains(logged.String(), noAccessWarning(path)); warned != tc.warned {
+			t.Errorf("%s: warned %v, want %v", tc.name, warned, tc.warned)
 		}
 	}
 }
@@ -446,6 +472,40 @@ func TestFirstReadAgain(t *testing.T) {
 	if got := read(t, r); got != (Result{Counted: 1, Blank: 1, Malformed: 1}) || hits(t, db) != 1 {
 		t.Errorf("Read of a readable line = %+v, %d hits; want 1 counted, 1 blank, 1 malformed, 1 hit", got,
 			hits(t, db))
+	}
+}
+
+// A first read of entries that are not accesses, as in Caddy's runtime log, writes nothing and warns. Later reads warn
+// no more and start the log over until one counts an access line.
+func TestFirstReadNotAccess(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "caddy.log")
+	runtimeEntry := `{"level":"info","logger":"tls","msg":"cleaning storage unit"}` + "\n"
+	writeLog(t, path, runtimeEntry)
+
+	var logged bytes.Buffer
+
+	logReader := loggedReader(t, db, path, logparse.ParseCaddyJSON, &logged)
+
+	if got := read(t, logReader); got != (Result{NotAccess: 1}) {
+		t.Errorf("first read = %+v, want 1 not an access", got)
+	}
+
+	appendLog(t, path, runtimeEntry)
+
+	if got := read(t, logReader); got != (Result{NotAccess: 2}) {
+		t.Errorf("second read = %+v, want 2 not an access", got)
+	}
+
+	appendLog(t, path, `{"ts":946684800,"request":{"method":"GET","uri":"/","host":"h","remote_ip":"192.0.2.1"},`+
+		`"status":200}`+"\n")
+
+	if got := read(t, logReader); got != (Result{Counted: 1, NotAccess: 2}) || hits(t, db) != 1 {
+		t.Errorf("third read = %+v, %d hits; want 1 counted, 2 not an access and 1 hit", got, hits(t, db))
+	}
+
+	if warnings := strings.Count(logged.String(), noAccessWarning(path)); warnings != 1 {
+		t.Errorf("%d warnings of no access line, want 1:\n%s", warnings, logged.String())
 	}
 }
 
@@ -810,7 +870,7 @@ func TestCountOptions(t *testing.T) {
 	options.DefaultHost = "h"
 	options.Now = func() time.Time { return base }
 
-	logReader := newReader(t, db, path, options)
+	logReader := newReader(t, db, path, logparse.ParseNCSA, options)
 
 	read(t, logReader)
 
@@ -837,7 +897,7 @@ func TestNoUserAgent(t *testing.T) {
 	options.NoUserAgent = true
 	options.Now = func() time.Time { return base }
 
-	read(t, newReader(t, db, path, options))
+	read(t, newReader(t, db, path, logparse.ParseNCSA, options))
 
 	kinds, err := db.Dim("h", "c", "2000", kvstore.Filter{}) // c: the client kind
 	if err != nil {
@@ -856,7 +916,7 @@ func TestClock(t *testing.T) {
 	now := time.Now()
 	writeLog(t, path, ncsa("10.0.0.1", "GET", "/", now)+"\n"+ncsa("10.0.0.2", "GET", "/", now.Add(2*ahead))+"\n")
 
-	logReader := newReader(t, db, path, DefaultOptions())
+	logReader := newReader(t, db, path, logparse.ParseNCSA, DefaultOptions())
 
 	if got := read(t, logReader); got != (Result{Counted: 1, BadDate: 1}) {
 		t.Errorf("Read = %+v, want 1 counted and 1 dated ahead", got)

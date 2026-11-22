@@ -49,7 +49,7 @@ var ErrUnreadable = errors.New("ingest: no readable line in the first read of a 
 type Options struct {
 	Count       kvstore.Options  // the counting rules of the store's batch
 	DefaultHost string           // the host of a line whose log names none, put in the form logparse.VHost returns
-	Log         *slog.Logger     // where each line not counted is told, at debug level; nil tells nothing
+	Log         *slog.Logger     // where reads warn, and tell each line not counted at debug level; nil tells nothing
 	Methods     []string         // the methods whose lines count; a line with another is dropped
 	NoUserAgent bool             // the log carries no User-Agent, even where a line seems to hold an empty one
 	Now         func() time.Time // the clock of the 24 hours a line may be ahead; nil is time.Now
@@ -98,6 +98,7 @@ type Reader struct {
 	now     func() time.Time
 	parse   logparse.Parser
 	path    string // absolute, the key of the log's state
+	warned  bool   // that the log has no access line yet
 }
 
 // New returns a reader of the log at path that parses its lines with parse and counts them into db by the rules of
@@ -182,9 +183,9 @@ func (o Options) check(parse logparse.Parser) error {
 // one kept open has no name left, it reads what that one gained and releases it. A last line with no newline yet waits
 // for the next read. A read with no new line writes nothing. The first read of a path, which has no state yet, writes
 // nothing unless it finds a readable line, counted or dropped, and fails with ErrUnreadable if it finds an unreadable
-// one instead. Any other read skips unreadable lines. Once ctx ends, a read fails with ctx's error before its next
-// line. A failed read writes nothing and keeps the old file, though its Result counts the lines it read before the
-// error.
+// one instead. If it finds only lines of neither kind, it warns once per reader. Any other read skips unreadable lines.
+// Once ctx ends, a read fails with ctx's error before its next line. A failed read writes nothing and keeps the old
+// file, though its Result counts the lines it read before the error.
 func (r *Reader) Read(ctx context.Context) (Result, error) {
 	var progress scan
 
@@ -210,6 +211,12 @@ func (r *Reader) Read(ctx context.Context) (Result, error) {
 	case err != nil:
 	case !hasState && !progress.readable:
 		err = progress.refused
+
+		if err == nil && progress.read && !r.warned {
+			r.log.Warn("no access line yet, so each read starts the log over", "path", r.path)
+
+			r.warned = true
+		}
 	case progress.read:
 		progress.batch.SetState(r.path, progress.last)
 		progress.result.ClosedYearPages, err = r.db.Flush(progress.batch)
