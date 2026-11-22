@@ -186,9 +186,10 @@ func (o Options) check(parse logparse.Parser) error {
 // flush in one transaction with the state of its last line. It goes on after the last line flushed when that line is
 // still at its offset, and else reads the log from its start: the path holds a new one. When the path names another
 // file than the one the reader keeps open, as after a rotation by rename, it first reads what the old file gained, then
-// the new one from its start. When the path names no file and the one kept open has no name left, it reads what that
-// one gained and releases it. A last line with no newline yet waits for the next read. A read with no new line writes
-// nothing. The first read of a path, which has no state yet, writes nothing unless it finds a readable line, counted or
+// the new one from its start, and keeps the new one; one with no whole line yet gets the state of no line read. When
+// the path names no file and the one kept open has no name left, it reads what that one gained and releases it. A last
+// line with no newline yet waits for the next read. A read with no new line writes nothing, unless it moves to a new
+// log. The first read of a path, which has no state yet, writes nothing unless it finds a readable line, counted or
 // dropped, and fails with ErrUnreadable if it finds an unreadable one instead. If it finds only lines of neither kind,
 // it warns once per reader. Any other read skips unreadable lines. Once ctx ends, a read fails with ctx's error before
 // its next line. A failed read keeps what it flushed and the file of its last flush, else the old one; its Result
@@ -224,27 +225,24 @@ func (r *Reader) Read(ctx context.Context) (Result, error) {
 
 			r.warned = true
 		}
-	case progress.pending > 0:
-		err = r.flush(file, &progress)
+	case progress.pending > 0 || progress.moved:
+		err = r.flush(&progress)
 	}
 
-	if err != nil {
+	// The logs are open read only, so a failed close loses nothing.
+	switch {
+	case err != nil:
 		if file != r.file {
-			_ = file.Close() // read only: a failed close loses nothing
+			_ = file.Close()
 		}
-
-		return progress.result, err
-	}
-
-	if file != r.file || gone {
-		_ = r.Close() // read only: a failed close loses nothing
-	}
-
-	if !gone {
+	case gone:
+		_ = r.Close()
+	case file != r.file:
+		_ = r.Close()
 		r.file = file
 	}
 
-	return progress.result, nil
+	return progress.result, err
 }
 
 // Close releases the log the reader keeps open. A later read opens it again.
@@ -283,7 +281,9 @@ func (r *Reader) open() (*os.File, error) {
 // What a read found, across the files it read.
 type scan struct {
 	batch    *kvstore.Batch
-	last     kvstore.LogState // the last line read
+	file     *os.File         // last's file
+	last     kvstore.LogState // the last line read, or none in a log moved to
+	moved    bool             // the read went on from the file kept open to a new one
 	pending  int              // the lines read since the last flush
 	readable bool             // a line counted or dropped
 	refused  error            // ErrUnreadable, naming the first unreadable line
@@ -291,8 +291,8 @@ type scan struct {
 	stated   bool // the path had a state before the read
 }
 
-// Flushes progress's batch with the state of its last line and keeps file open in place of r.file.
-func (r *Reader) flush(file *os.File, progress *scan) error {
+// Flushes progress's batch with the state of its last line and keeps progress.file open in place of r.file.
+func (r *Reader) flush(progress *scan) error {
 	progress.batch.SetState(r.path, progress.last)
 
 	closedYearPages, err := r.db.Flush(progress.batch)
@@ -303,9 +303,9 @@ func (r *Reader) flush(file *os.File, progress *scan) error {
 	progress.pending = 0
 	progress.result.ClosedYearPages += closedYearPages
 
-	if file != r.file {
+	if progress.file != r.file {
 		_ = r.Close() // read only: a failed close loses nothing
-		r.file = file
+		r.file = progress.file
 	}
 
 	return nil
@@ -324,6 +324,8 @@ func (r *Reader) readAll(ctx context.Context, file *os.File, state kvstore.LogSt
 			return err
 		}
 
+		// The new log, with no line read yet, which the next read takes from its start until a line of it is flushed.
+		progress.file, progress.last, progress.moved = file, kvstore.LogState{}, true
 		hasState = false
 	}
 
@@ -356,7 +358,7 @@ func (r *Reader) readFile(ctx context.Context, file *os.File, state kvstore.LogS
 
 		offset += size
 		lineNum++
-		progress.last = kvstore.LogState{Line: lineNum, Offset: logLine.start, Sum: logLine.sum}
+		progress.file, progress.last = file, kvstore.LogState{Line: lineNum, Offset: logLine.start, Sum: logLine.sum}
 		progress.pending++
 
 		event, judged, why := judge(logLine, r.parse, r.methods, r.host, limit, r.db.Location())
@@ -382,7 +384,7 @@ func (r *Reader) readFile(ctx context.Context, file *os.File, state kvstore.LogS
 		}
 
 		if progress.pending >= r.chunk && (progress.stated || progress.readable) {
-			if err := r.flush(file, progress); err != nil {
+			if err := r.flush(progress); err != nil {
 				return err
 			}
 		}
@@ -404,10 +406,10 @@ func (r *Reader) tell(msg string, l line, num int64, f fate, attrs ...any) {
 	r.log.Debug(msg, append([]any{"path", r.path, "line", num, "offset", l.start, "reason", f.String()}, attrs...)...)
 }
 
-// Places a reader of f after the line s names, when ok and that line is still there; else at the start of f, which
-// holds a new log. It also returns the reader's offset and the number of the line before it.
+// Places a reader of f after the line s names, when ok and s names a line that is still there; else at the start of f,
+// which holds a new log. It also returns the reader's offset and the number of the line before it.
 func resume(f *os.File, s kvstore.LogState, ok bool) (*bufio.Reader, int64, int64, error) {
-	if ok {
+	if ok && s.Line > 0 {
 		if _, err := f.Seek(s.Offset, io.SeekStart); err != nil {
 			return nil, 0, 0, err
 		}

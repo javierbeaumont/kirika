@@ -22,6 +22,7 @@
 package ingest
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -745,22 +746,154 @@ func TestChunksRotateFlushError(t *testing.T) {
 	}
 }
 
-// A read into a new log with no whole line yet lets the old file go.
-func TestRotateNothingNew(t *testing.T) {
+// A reader keeps the log it opened even when its first read finds no line, so a rotation before the next read loses
+// nothing that log gained.
+func TestRotateAfterEmptyRead(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, "")
+	logReader := reader(t, db, path)
+
+	if got := read(t, logReader); got != (Result{}) {
+		t.Errorf("Read of an empty log = %+v, want nothing", got)
+	}
+
+	appendLog(t, path, gets(0, 1))
+	rename(t, path, path+".1")
+	writeLog(t, path, gets(1, 1))
+
+	if got := read(t, logReader); got != (Result{Counted: 2}) || hits(t, db) != 2 {
+		t.Errorf("Read after the rotation = %+v, %d hits; want 2 counted, 2 hits", got, hits(t, db))
+	}
+}
+
+// A log rotated in with no line yet is the one a read keeps, so a second rotation before the next read loses nothing
+// that log gained.
+func TestRotateTwice(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")
 	writeLog(t, path, gets(0, 1))
 	logReader := reader(t, db, path)
 	read(t, logReader)
 	rename(t, path, path+".1")
-	writeLog(t, path, "partial")
+	writeLog(t, path, "")
+	read(t, logReader)
+	appendLog(t, path, gets(1, 2))
+	rename(t, path, path+".2")
+	writeLog(t, path, gets(3, 1))
 
-	if got := read(t, logReader); got != (Result{}) {
-		t.Errorf("Read = %+v, want nothing", got)
+	if got := read(t, logReader); got != (Result{Counted: 3}) || hits(t, db) != 4 {
+		t.Errorf("Read after the second rotation = %+v, %d hits; want 3 counted, 4 hits", got, hits(t, db))
+	}
+}
+
+// With no state yet, a read after a rotation keeps the new log, so the next read does not take the old one again.
+func TestRotateNoState(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, "\n")
+	logReader := reader(t, db, path)
+	read(t, logReader)
+	rename(t, path, path+".1")
+	writeLog(t, path, "\n\n")
+
+	for _, want := range []Result{{Blank: 3}, {Blank: 2}} {
+		if got := read(t, logReader); got != want {
+			t.Errorf("Read = %+v, want %+v", got, want)
+		}
+
+		if count := opened(t, path+".1"); count != 0 {
+			t.Errorf("the old file is open %d times after the read, want 0", count)
+		}
+	}
+}
+
+// A state of no line read takes the log from its start, even when its first line has the state's checksum.
+func TestNoLineState(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, gets(0, 1))
+
+	first, _, _, err := next(bufio.NewReader(strings.NewReader(gets(0, 1))), 0)
+	if err != nil {
+		t.Fatalf("next: %v", err)
 	}
 
-	if count := opened(t, path+".1"); count != 0 {
-		t.Errorf("the old file is open %d times after the read, want 0", count)
+	batch := db.NewBatch(kvstore.DefaultOptions())
+	batch.SetState(path, kvstore.LogState{Sum: first.sum})
+
+	if _, err := db.Flush(batch); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	if got := read(t, reader(t, db, path)); got != (Result{Counted: 1}) {
+		t.Errorf("Read = %+v, want 1 counted", got)
+	}
+}
+
+// A failed read of a deleted log keeps it, so the next read takes the rest.
+func TestDeletedStopped(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, gets(0, 1))
+	logReader := reader(t, db, path)
+	read(t, logReader)
+	appendLog(t, path, gets(1, 2))
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	// The check before the first line it gained.
+	if _, err := logReader.Read(&countdown{Context: t.Context(), n: 1}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopped Read: %v, want context.Canceled", err)
+	}
+
+	if got := read(t, logReader); got != (Result{Counted: 2}) || hits(t, db) != 3 {
+		t.Errorf("next Read = %+v, %d hits; want 2 counted, 3 hits", got, hits(t, db))
+	}
+}
+
+// A failed read releases the log it opened.
+func TestFailedReadCloses(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, "garbage\n")
+
+	if _, err := reader(t, db, path).Read(t.Context()); !errors.Is(err, ErrUnreadable) {
+		t.Fatalf("Read: %v, want ErrUnreadable", err)
+	}
+
+	if count := opened(t, path); count != 0 {
+		t.Errorf("the log is open %d times after a failed read, want 0", count)
+	}
+}
+
+// After a rotation into a log with no whole line yet, a read records that log with no line read, keeps it and lets the
+// old file go, whether or not it took lines of the old file. Once the new log has whole lines, the next read takes them
+// all, even when that log begins as the old one did.
+func TestRotateNoWholeLine(t *testing.T) {
+	for _, gained := range []int{0, 1} {
+		db := openStore(t)
+		path := filepath.Join(t.TempDir(), "access.log")
+		writeLog(t, path, gets(0, 1))
+		logReader := reader(t, db, path)
+		read(t, logReader)
+		appendLog(t, path, gets(1, gained))
+		rename(t, path, path+".1")
+		writeLog(t, path, strings.TrimSuffix(gets(0, 1), "\n")) // the old log's first line, with no newline yet
+
+		got, old, current := read(t, logReader), opened(t, path+".1"), opened(t, path)
+		if got != (Result{Counted: gained}) || old != 0 || current != 1 {
+			t.Errorf("%d gained: Read of a new log with no whole line = %+v, the old file open %d times and the new "+
+				"one %d; want %d counted, 0 and 1", gained, got, old, current, gained)
+		}
+
+		appendLog(t, path, "\n"+gets(1, 1))
+
+		if got := read(t, logReader); got != (Result{Counted: 2}) || hits(t, db) != int64(3+gained) {
+			t.Errorf("%d gained: next Read = %+v, %d hits; want 2 counted, %d hits", gained, got, hits(t, db), 3+gained)
+		}
 	}
 }
 

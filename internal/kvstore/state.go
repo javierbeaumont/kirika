@@ -34,7 +34,7 @@ var errBadState = errors.New("kvstore: corrupt or unknown log state")
 // LogState is where reading a log stopped: the number and offset of the last line read, and a checksum of that line,
 // which tells whether the path still holds that log.
 type LogState struct {
-	Line   int64 // counted from 1
+	Line   int64 // counted from 1; 0 when no line was read yet
 	Offset int64
 	Sum    [8]byte
 }
