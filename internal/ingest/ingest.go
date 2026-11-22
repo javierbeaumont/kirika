@@ -79,7 +79,7 @@ type Result struct {
 	Malformed       int // unreadable: the parser refused it
 	Binary          int // unreadable: it starts with a NUL byte
 	TooLong         int // unreadable: longer than 1 MiB
-	BadDate         int // unreadable: dated more than 24 hours after the read, or before the year 1000
+	BadDate         int // unreadable: dated over 24 hours ahead, or out of years 1000-9999 in the store's zone
 }
 
 // Unreadable returns the number of unreadable lines.
@@ -331,7 +331,7 @@ func (r *Reader) readFile(ctx context.Context, file *os.File, state kvstore.LogS
 		lineNum++
 		progress.last, progress.read = kvstore.LogState{Line: lineNum, Offset: logLine.start, Sum: logLine.sum}, true
 
-		event, judged, why := judge(logLine, r.parse, r.methods, r.host, limit)
+		event, judged, why := judge(logLine, r.parse, r.methods, r.host, limit, r.db.Location())
 		progress.result.add(judged)
 
 		switch {
@@ -423,7 +423,7 @@ func (f fate) String() string {
 		malformed: "malformed",
 		binary:    "binary",
 		tooLong:   "longer than 1 MiB",
-		badDate:   "dated more than 24 hours ahead or before the year 1000",
+		badDate:   "dated more than 24 hours ahead or out of years 1000-9999",
 	}[f]
 }
 
@@ -450,35 +450,38 @@ func (res *Result) add(f fate) {
 }
 
 // Decides the fate of a line and returns its event, with host when its log names none. why is the parser's error for a
-// malformed line.
-func judge(l line, parse logparse.Parser, methods map[string]bool, host string, limit time.Time) (
-	ev logparse.Event, f fate, why error,
-) {
+// malformed line. A line whose method counts is unreadable when dated after limit or out of the years 1000 to 9999 in
+// zone.
+func judge(logLine line, parse logparse.Parser, methods map[string]bool, host string, limit time.Time,
+	zone *time.Location,
+) (event logparse.Event, judged fate, why error) {
 	switch {
-	case l.long:
-		return ev, tooLong, nil
-	case len(bytes.TrimSpace(l.text)) == 0:
-		return ev, blank, nil
-	case l.text[0] == 0:
-		return ev, binary, nil
+	case logLine.long:
+		return event, tooLong, nil
+	case len(bytes.TrimSpace(logLine.text)) == 0:
+		return event, blank, nil
+	case logLine.text[0] == 0:
+		return event, binary, nil
 	}
 
-	ev, err := parse(l.text)
+	event, err := parse(logLine.text)
 
 	switch {
 	case errors.Is(err, logparse.ErrNotAccessLog):
-		return ev, notAccess, nil
+		return event, notAccess, nil
 	case err != nil:
-		return ev, malformed, err
-	case !methods[ev.Method]:
-		return ev, dropped, nil
-	case ev.Time.Year() < 1000 || ev.Time.After(limit):
-		return ev, badDate, nil
+		return event, malformed, err
+	case !methods[event.Method]:
+		return event, dropped, nil
 	}
 
-	if ev.Host == "" {
-		ev.Host = host
+	if year := event.Time.In(zone).Year(); year < 1000 || year > 9999 || event.Time.After(limit) {
+		return event, badDate, nil
 	}
 
-	return ev, counted, nil
+	if event.Host == "" {
+		event.Host = host
+	}
+
+	return event, counted, nil
 }

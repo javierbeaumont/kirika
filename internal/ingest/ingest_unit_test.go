@@ -134,7 +134,7 @@ func TestDefaultMethods(t *testing.T) {
 // A line is too long, blank or binary before it is parsed; then not an access or malformed as the parser says; then
 // dropped for its method, or unreadable for its date; else counted, under the default host when its log names none.
 func TestJudge(t *testing.T) {
-	limit, old := base.Add(ahead), base.AddDate(-1000, 0, 0)
+	limit := base.Add(ahead)
 	errBad := errors.New("bad")
 	methods := map[string]bool{"GET": true}
 
@@ -152,10 +152,9 @@ func TestJudge(t *testing.T) {
 		{"malformed", line{text: []byte("bad")}, logparse.Event{}, malformed},
 		{"method out", line{text: []byte("ok")}, logparse.Event{Method: "TRACE", Time: base}, dropped},
 		{"lower case", line{text: []byte("ok")}, logparse.Event{Method: "get", Time: base}, dropped},
+		{"method out, ahead", line{text: []byte("ok")}, logparse.Event{Method: "TRACE", Time: limit.Add(1)}, dropped},
 		{"at the limit", line{text: []byte("ok")}, logparse.Event{Method: "GET", Time: limit}, counted},
 		{"past the limit", line{text: []byte("ok")}, logparse.Event{Method: "GET", Time: limit.Add(1)}, badDate},
-		{"year 1000", line{text: []byte("ok")}, logparse.Event{Method: "GET", Time: old}, counted},
-		{"year 999", line{text: []byte("ok")}, logparse.Event{Method: "GET", Time: old.AddDate(-1, 0, 0)}, badDate},
 		{"no host", line{text: []byte("ok")}, logparse.Event{Method: "GET", Time: base}, counted},
 		{"a host", line{text: []byte("ok")}, logparse.Event{Host: "h", Method: "GET", Time: base}, counted},
 	} {
@@ -170,13 +169,40 @@ func TestJudge(t *testing.T) {
 			return logparse.Event{}, errBad
 		}
 
-		ev, f, why := judge(tc.l, parse, methods, "default", limit)
-		if f != tc.want || (f == malformed) != errors.Is(why, errBad) || f != malformed && why != nil {
-			t.Errorf("%s: fate %v, %v; want %v", tc.name, f, why, tc.want)
+		event, judged, why := judge(tc.l, parse, methods, "default", limit, time.UTC)
+		if judged != tc.want || (judged == malformed) != errors.Is(why, errBad) || judged != malformed && why != nil {
+			t.Errorf("%s: fate %v, %v; want %v", tc.name, judged, why, tc.want)
 		}
 
-		if want := map[string]string{"": "default", "h": "h"}[tc.ev.Host]; f == counted && ev.Host != want {
-			t.Errorf("%s: host %q, want %q", tc.name, ev.Host, want)
+		if want := map[string]string{"": "default", "h": "h"}[tc.ev.Host]; judged == counted && event.Host != want {
+			t.Errorf("%s: host %q, want %q", tc.name, event.Host, want)
+		}
+	}
+}
+
+// A line counts only in the years 1000 to 9999 of the zone, whatever its year in UTC.
+func TestJudgeYears(t *testing.T) {
+	const east = 14 * time.Hour
+
+	zone := time.FixedZone("+14", int(east.Seconds()))
+	// The first instants of the years 1000 and 10000 in zone.
+	first, end := base.AddDate(-1000, 0, 0).Add(-east), base.AddDate(8000, 0, 0).Add(-east)
+
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		want fate
+	}{
+		{"year 999", first.Add(-time.Second), badDate},
+		{"year 1000, 999 in UTC", first, counted},
+		{"year 9999", end.Add(-time.Second), counted},
+		{"year 10000, 9999 in UTC", end, badDate},
+	} {
+		parse := func([]byte) (logparse.Event, error) { return logparse.Event{Method: "GET", Time: tc.at}, nil }
+
+		_, judged, _ := judge(line{text: []byte("ok")}, parse, map[string]bool{"GET": true}, "h", end.Add(ahead), zone)
+		if judged != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, judged, tc.want)
 		}
 	}
 }

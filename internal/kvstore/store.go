@@ -121,9 +121,9 @@ func openFile(path string, options *bolt.Options) (*bolt.DB, error) {
 	return file, nil
 }
 
-// Zone returns the name of the store's time zone.
-func (db *DB) Zone() string {
-	return db.loc.String()
+// Location returns the store's time zone.
+func (db *DB) Location() *time.Location {
+	return db.loc
 }
 
 // Close releases the store and its lock.

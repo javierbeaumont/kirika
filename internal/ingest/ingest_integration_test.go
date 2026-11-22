@@ -39,11 +39,18 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-// Returns a store in a fresh directory, closed when the test ends.
+// Returns a store in UTC.
 func openStore(t *testing.T) *kvstore.DB {
 	t.Helper()
 
-	db, err := kvstore.Open(filepath.Join(t.TempDir(), "kirika.db"), time.Second, "UTC")
+	return openZone(t, "UTC")
+}
+
+// Returns a store in zone in a fresh directory, closed when the test ends.
+func openZone(t *testing.T, zone string) *kvstore.DB {
+	t.Helper()
+
+	db, err := kvstore.Open(filepath.Join(t.TempDir(), "kirika.db"), time.Second, zone)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -347,7 +354,7 @@ func TestReasons(t *testing.T) {
 
 	for _, reason := range []string{
 		"blank", "binary", "longer than 1 MiB", "malformed", "method not counted",
-		"dated more than 24 hours ahead or before the year 1000", "method=TRACE", "error=",
+		"dated more than 24 hours ahead or out of years 1000-9999", "method=TRACE", "error=",
 	} {
 		if !strings.Contains(logged.String(), reason) {
 			t.Errorf("no report says %q", reason)
@@ -422,7 +429,7 @@ func TestFirstRead(t *testing.T) {
 		{"too long", strings.Repeat("x", maxLine+1) + "\n", refused + "line 1 is longer than 1 MiB", false, false},
 		{
 			"dated ahead", ncsa("192.0.2.1", "GET", "/", base.Add(2*ahead)) + "\n",
-			refused + "line 1 is dated more than 24 hours ahead or before the year 1000", false, false,
+			refused + "line 1 is dated more than 24 hours ahead or out of years 1000-9999", false, false,
 		},
 		{"malformed and a counted one", "garbage\n" + gets(0, 1), "", true, false},
 		{"malformed and a dropped one", "garbage\n" + ncsa("192.0.2.1", "TRACE", "/", base) + "\n", "", true, false},
@@ -506,6 +513,26 @@ func TestFirstReadNotAccess(t *testing.T) {
 
 	if warnings := strings.Count(logged.String(), noAccessWarning(path)); warnings != 1 {
 		t.Errorf("%d warnings of no access line, want 1:\n%s", warnings, logged.String())
+	}
+}
+
+// A line in the year 10000 of the store's zone is unreadable: its nine-digit day key would break Hosts for the whole
+// store.
+func TestYear10000(t *testing.T) {
+	db := openZone(t, "Pacific/Kiritimati")
+	path := filepath.Join(t.TempDir(), "access.log")
+	end := base.AddDate(8000, 0, 0).Add(-14 * time.Hour) // the first instant of the year 10000 in the store's zone
+	writeLog(t, path, ncsa("192.0.2.1", "GET", "/", end.Add(-time.Second))+"\n"+ncsa("192.0.2.1", "GET", "/", end)+"\n")
+
+	options := DefaultOptions()
+	options.Now = func() time.Time { return end }
+
+	if got := read(t, newReader(t, db, path, logparse.ParseNCSA, options)); got != (Result{Counted: 1, BadDate: 1}) {
+		t.Errorf("Read = %+v, want 1 counted and 1 badly dated", got)
+	}
+
+	if _, err := db.Hosts(); err != nil {
+		t.Errorf("Hosts: %v", err)
 	}
 }
 

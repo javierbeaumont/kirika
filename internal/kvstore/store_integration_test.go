@@ -459,7 +459,7 @@ func openZone(t *testing.T, path, zone string) (string, error) {
 
 	defer closeStore(t, db)
 
-	return db.Zone(), nil
+	return db.Location().String(), nil
 }
 
 // A new store keeps the configured zone, else the system's. Reopened, it keeps that zone and refuses another. Local,
