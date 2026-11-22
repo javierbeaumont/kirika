@@ -79,19 +79,21 @@ func follow(t *testing.T, interval time.Duration, steps ...step) (logged string,
 	return buf.String(), changes
 }
 
-// onChange follows each read that counted a line, and no other: a failed read wrote nothing, whatever it counted.
+// onChange follows each read that counted a line, failed or not, and no other: a failed read keeps the chunks it
+// flushed.
 func TestRunChanges(t *testing.T) {
 	_, changes := follow(t, time.Nanosecond,
 		step{res: ingest.Result{Counted: 1}},
 		step{res: ingest.Result{Blank: 1, Dropped: 1}},
 		step{},
 		step{err: errors.New("gone")},
-		step{res: ingest.Result{Counted: 4, Malformed: 50}, err: ingest.ErrUnreadable},
+		step{res: ingest.Result{Malformed: 50}, err: ingest.ErrUnreadable},
+		step{res: ingest.Result{Counted: 4}, err: errors.New("disk full")},
 		step{res: ingest.Result{Counted: 2}},
 	)
 
-	if changes != 2 {
-		t.Errorf("onChange called %d times, want 2", changes)
+	if changes != 3 {
+		t.Errorf("onChange called %d times, want 3", changes)
 	}
 }
 
@@ -162,16 +164,18 @@ func TestRunStopped(t *testing.T) {
 	}
 }
 
-// A failed read is logged once until its error changes or a read succeeds again, which is told.
+// A failed read is logged once until its error changes or a read succeeds again, which is told; its counts are not.
 func TestRunErrors(t *testing.T) {
 	gone, bad := errors.New("log gone"), errors.New("format bad")
 	logged, _ := follow(t, time.Nanosecond,
-		step{err: gone}, step{err: gone}, step{err: bad}, step{}, step{}, step{err: gone})
+		step{err: gone}, step{err: gone}, step{res: ingest.Result{Counted: 4, Malformed: 1}, err: bad}, step{}, step{},
+		step{err: gone})
 
 	for text, want := range map[string]int{
 		`msg="read failed" error="log gone"`:   2,
 		`msg="read failed" error="format bad"`: 1,
 		`msg="read again"`:                     1,
+		"counted=":                             0,
 	} {
 		if got := strings.Count(logged, text); got != want {
 			t.Errorf("%d logs of %s, want %d:\n%s", got, text, want, logged)

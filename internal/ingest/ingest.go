@@ -17,8 +17,8 @@
 // You should have received a copy of the GNU General Public License
 // along with kirika. If not, see <https://www.gnu.org/licenses/>.
 
-// Package ingest reads access logs into a store. A read goes on after the last line the previous one took, counts its
-// lines in one batch and writes them, with where it stopped, in one transaction.
+// Package ingest reads access logs into a store. A read goes on after the last line stored and counts its lines in
+// batches, each written in one transaction with the state of its last line.
 package ingest
 
 import (
@@ -40,6 +40,10 @@ import (
 
 // How far ahead of a read a line may be dated, for a clock that runs a little fast.
 const ahead = 24 * time.Hour
+
+// The lines between two flushes of a read, as a batch grows with its lines: a read of 1,500,000 lines of 500,000
+// clients peaked at 43 MB of heap, where one batch took 617 MB.
+const chunk = 50_000
 
 // ErrUnreadable is the error of the first read of a path when it finds unreadable lines and no readable one, as with a
 // wrong log format.
@@ -72,7 +76,7 @@ func DefaultMethods() []string {
 // Result counts the lines of a read by what became of them.
 type Result struct {
 	Counted         int // in the store
-	ClosedYearPages int // the counted pages with a client of a year closed before the read: no unique visitor
+	ClosedYearPages int // the counted pages with a client of a year closed before their flush: no unique visitor
 	Blank           int // empty or spaces only
 	NotAccess       int // a message that is not an access, which Caddy writes in its log too
 	Dropped         int // a method out of Options.Methods
@@ -89,6 +93,7 @@ func (res Result) Unreadable() int {
 
 // Reader reads one log into a store, a read at a time. It keeps the log open between reads, until Close.
 type Reader struct {
+	chunk   int // chunk outside a test
 	count   kvstore.Options
 	db      *kvstore.DB
 	file    *os.File // the log kept open, nil when none
@@ -115,6 +120,7 @@ func New(db *kvstore.DB, path string, parse logparse.Parser, options Options) (*
 	}
 
 	reader := &Reader{
+		chunk:   chunk,
 		count:   options.Count,
 		db:      db,
 		host:    logparse.VHost(options.DefaultHost),
@@ -176,16 +182,17 @@ func (o Options) check(parse logparse.Parser) error {
 	return nil
 }
 
-// Read counts the lines written to the log since the last read and stores where it stopped, all in one transaction. It
-// goes on after the last line read when that line is still at its offset, and else reads the log from its start: the
-// path holds a new one. When the path names another file than the one the reader keeps open, as after a rotation by
-// rename, it first reads what the old file gained, then the new one from its start. When the path names no file and the
-// one kept open has no name left, it reads what that one gained and releases it. A last line with no newline yet waits
-// for the next read. A read with no new line writes nothing. The first read of a path, which has no state yet, writes
-// nothing unless it finds a readable line, counted or dropped, and fails with ErrUnreadable if it finds an unreadable
-// one instead. If it finds only lines of neither kind, it warns once per reader. Any other read skips unreadable lines.
-// Once ctx ends, a read fails with ctx's error before its next line. A failed read writes nothing and keeps the old
-// file, though its Result counts the lines it read before the error.
+// Read counts the lines written to the log since the last flush. It flushes in chunks of lines and at its end, each
+// flush in one transaction with the state of its last line. It goes on after the last line flushed when that line is
+// still at its offset, and else reads the log from its start: the path holds a new one. When the path names another
+// file than the one the reader keeps open, as after a rotation by rename, it first reads what the old file gained, then
+// the new one from its start. When the path names no file and the one kept open has no name left, it reads what that
+// one gained and releases it. A last line with no newline yet waits for the next read. A read with no new line writes
+// nothing. The first read of a path, which has no state yet, writes nothing unless it finds a readable line, counted or
+// dropped, and fails with ErrUnreadable if it finds an unreadable one instead. If it finds only lines of neither kind,
+// it warns once per reader. Any other read skips unreadable lines. Once ctx ends, a read fails with ctx's error before
+// its next line. A failed read keeps what it flushed and the file of its last flush, else the old one; its Result
+// counts the lines it read before the error.
 func (r *Reader) Read(ctx context.Context) (Result, error) {
 	var progress scan
 
@@ -212,14 +219,13 @@ func (r *Reader) Read(ctx context.Context) (Result, error) {
 	case !hasState && !progress.readable:
 		err = progress.refused
 
-		if err == nil && progress.read && !r.warned {
+		if err == nil && progress.pending > 0 && !r.warned {
 			r.log.Warn("no access line yet, so each read starts the log over", "path", r.path)
 
 			r.warned = true
 		}
-	case progress.read:
-		progress.batch.SetState(r.path, progress.last)
-		progress.result.ClosedYearPages, err = r.db.Flush(progress.batch)
+	case progress.pending > 0:
+		err = r.flush(file, &progress)
 	}
 
 	if err != nil {
@@ -278,10 +284,31 @@ func (r *Reader) open() (*os.File, error) {
 type scan struct {
 	batch    *kvstore.Batch
 	last     kvstore.LogState // the last line read
-	read     bool             // a line at least
+	pending  int              // the lines read since the last flush
 	readable bool             // a line counted or dropped
 	refused  error            // ErrUnreadable, naming the first unreadable line
 	result   Result
+	stated   bool // the path had a state before the read
+}
+
+// Flushes progress's batch with the state of its last line and keeps file open in place of r.file.
+func (r *Reader) flush(file *os.File, progress *scan) error {
+	progress.batch.SetState(r.path, progress.last)
+
+	closedYearPages, err := r.db.Flush(progress.batch)
+	if err != nil {
+		return err
+	}
+
+	progress.pending = 0
+	progress.result.ClosedYearPages += closedYearPages
+
+	if file != r.file {
+		_ = r.Close() // read only: a failed close loses nothing
+		r.file = file
+	}
+
+	return nil
 }
 
 // Reads file into progress as readFile does. When r.file is another file, it reads r.file first, then file from its
@@ -289,7 +316,7 @@ type scan struct {
 func (r *Reader) readAll(ctx context.Context, file *os.File, state kvstore.LogState, hasState bool,
 	progress *scan,
 ) error {
-	progress.batch = r.db.NewBatch(r.count)
+	progress.batch, progress.stated = r.db.NewBatch(r.count), hasState
 	limit := r.now().Add(ahead)
 
 	if r.file != nil && file != r.file {
@@ -329,7 +356,8 @@ func (r *Reader) readFile(ctx context.Context, file *os.File, state kvstore.LogS
 
 		offset += size
 		lineNum++
-		progress.last, progress.read = kvstore.LogState{Line: lineNum, Offset: logLine.start, Sum: logLine.sum}, true
+		progress.last = kvstore.LogState{Line: lineNum, Offset: logLine.start, Sum: logLine.sum}
+		progress.pending++
 
 		event, judged, why := judge(logLine, r.parse, r.methods, r.host, limit, r.db.Location())
 		progress.result.add(judged)
@@ -351,6 +379,12 @@ func (r *Reader) readFile(ctx context.Context, file *os.File, state kvstore.LogS
 			}
 		default:
 			r.tell("line skipped", logLine, lineNum, judged)
+		}
+
+		if progress.pending >= r.chunk && (progress.stated || progress.readable) {
+			if err := r.flush(file, progress); err != nil {
+				return err
+			}
 		}
 	}
 }

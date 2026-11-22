@@ -38,11 +38,12 @@ type Reader interface {
 	Read(ctx context.Context) (ingest.Result, error)
 }
 
-// Run reads reader with ctx now, then every interval until ctx ends, calling onChange, unless nil, after each read that
-// counted a line. It logs to log, unless nil: a failed read as an error, once until the error changes or a read
-// succeeds again, which it tells too; the counts of a read with unreadable lines or pages with a client of a closed
-// year as a warning; and those of any other read that took lines at debug level. A read that ctx stopped is not logged.
-// It panics if interval is not positive.
+// Run reads reader with ctx now, then every interval until ctx ends. It calls onChange, unless nil, after each read
+// that counted a line, failed or not: a failed read keeps what it flushed. It logs to log, unless nil: a failed read as
+// an error, once until the error changes or a read succeeds again, which it tells too; the counts of a read with
+// unreadable lines or pages with a client of a closed year as a warning; and those of any other read that took lines at
+// debug level. A read that ctx stopped ends Run without a log or a call to onChange. It panics if interval is not
+// positive.
 func Run(ctx context.Context, reader Reader, interval time.Duration, log *slog.Logger, onChange func()) {
 	if interval <= 0 {
 		panic(fmt.Sprintf("follow: interval %v is not positive", interval))
@@ -76,10 +77,10 @@ func Run(ctx context.Context, reader Reader, interval time.Duration, log *slog.L
 
 		if err == nil {
 			report(log, result)
+		}
 
-			if result.Counted > 0 && onChange != nil {
-				onChange()
-			}
+		if result.Counted > 0 && onChange != nil {
+			onChange()
 		}
 
 		select {
