@@ -151,7 +151,7 @@ func loggedReader(t *testing.T, db *kvstore.DB, path string, parse logparse.Pars
 
 // Returns the logged warning that the log at path has no access line yet.
 func noAccessWarning(path string) string {
-	return `level=WARN msg="no access line yet, so each read starts the log over" path=` + path + "\n"
+	return `level=WARN msg="no access line yet, so a new reader starts the log over" path=` + path + "\n"
 }
 
 // Reads r, failing the test on error.
@@ -330,8 +330,8 @@ func TestLongLastLine(t *testing.T) {
 	}
 }
 
-// Each line not counted adds to its own counter and is told at debug level with its offset and reason, never with its
-// content.
+// Each line not counted adds to its own counter and is told once at debug level with its offset and reason, never with
+// its content; a counted one is not told.
 func TestReasons(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")
@@ -362,9 +362,15 @@ func TestReasons(t *testing.T) {
 	}
 
 	offset := 0
+
 	for i, text := range lines {
-		if i != 0 && i != 6 && !strings.Contains(logged.String(), fmt.Sprintf("line=%d offset=%d ", i+1, offset)) {
-			t.Errorf("no report of line %d at offset %d", i+1, offset)
+		want := 1
+		if i == 0 || i == 6 {
+			want = 0
+		}
+
+		if told := strings.Count(logged.String(), fmt.Sprintf("line=%d offset=%d ", i+1, offset)); told != want {
+			t.Errorf("%d reports of line %d at offset %d, want %d", told, i+1, offset, want)
 		}
 
 		offset += len(text) + 1
@@ -474,34 +480,114 @@ func TestFirstRead(t *testing.T) {
 	}
 }
 
-// A first read that writes nothing leaves the path without a state, and the next one reads the log from its start:
-// after blank lines, an unreadable one fails it, and a readable one then counts.
+// A first read that writes nothing leaves the path without a state, and the reader's next read goes on after the lines
+// it took: after blank lines, an unreadable one fails it, again at each read, and a readable one then counts and gives
+// the path a state, which the next read goes by. In chunks of a line, the reads before the readable one flush nothing.
 func TestFirstReadAgain(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")
 	writeLog(t, path, "\n")
-	r := reader(t, db, path)
+	logReader := reader(t, db, path)
+	logReader.chunk = 1
 
-	if got := read(t, r); got != (Result{Blank: 1}) {
+	if got := read(t, logReader); got != (Result{Blank: 1}) {
 		t.Errorf("Read of a blank line = %+v, want 1 blank", got)
+	}
+
+	appendLog(t, path, "\n")
+
+	if got := read(t, logReader); got != (Result{Blank: 1}) {
+		t.Errorf("Read of one more blank line = %+v, want 1 blank", got)
 	}
 
 	appendLog(t, path, "garbage\n")
 
-	if got, err := r.Read(t.Context()); got != (Result{Blank: 1, Malformed: 1}) || !errors.Is(err, ErrUnreadable) {
-		t.Errorf("Read of an unreadable line = %+v, %v; want 1 blank, 1 malformed and ErrUnreadable", got, err)
+	for range 2 {
+		got, err := logReader.Read(t.Context())
+		if got != (Result{Malformed: 1}) || !errors.Is(err, ErrUnreadable) || !strings.Contains(fmt.Sprint(err),
+			"line 3 is malformed") {
+			t.Errorf("Read of an unreadable line = %+v, %v; want 1 malformed and ErrUnreadable for line 3", got, err)
+		}
+	}
+
+	if _, ok, err := db.State(path); ok || err != nil {
+		t.Errorf("a state before a readable line %v, %v; want none", ok, err)
 	}
 
 	appendLog(t, path, gets(0, 1))
 
-	if got := read(t, r); got != (Result{Counted: 1, Blank: 1, Malformed: 1}) || hits(t, db) != 1 {
-		t.Errorf("Read of a readable line = %+v, %d hits; want 1 counted, 1 blank, 1 malformed, 1 hit", got,
-			hits(t, db))
+	if got := read(t, logReader); got != (Result{Counted: 1, Malformed: 1}) || hits(t, db) != 1 {
+		t.Errorf("Read of a readable line = %+v, %d hits; want 1 counted, 1 malformed, 1 hit", got, hits(t, db))
+	}
+
+	if got := read(t, logReader); got != (Result{}) || hits(t, db) != 1 {
+		t.Errorf("Read once the path has a state = %+v, %d hits; want nothing, 1 hit", got, hits(t, db))
+	}
+}
+
+// The place in a log with no state yet is the reader's alone: a new reader starts the log over, and so does the same
+// one once closed. A read with no new line or stopped keeps it.
+func TestFirstReadPlace(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, "\n")
+	logReader := reader(t, db, path)
+
+	for _, want := range []Result{{Blank: 1}, {}} {
+		if got := read(t, logReader); got != want {
+			t.Errorf("Read = %+v, want %+v", got, want)
+		}
+	}
+
+	appendLog(t, path, "\n\n")
+
+	// The check before the first new line.
+	if got, err := logReader.Read(&countdown{Context: t.Context(), n: 1}); got != (Result{Blank: 1}) || !errors.Is(err,
+		context.Canceled) {
+		t.Errorf("stopped Read = %+v, %v; want 1 blank, context.Canceled", got, err)
+	}
+
+	if got := read(t, logReader); got != (Result{Blank: 2}) {
+		t.Errorf("Read after a stopped one = %+v, want 2 blank", got)
+	}
+
+	if got := read(t, reader(t, db, path)); got != (Result{Blank: 3}) {
+		t.Errorf("a new reader's Read = %+v, want 3 blank", got)
+	}
+
+	if err := logReader.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if got := read(t, logReader); got != (Result{Blank: 3}) {
+		t.Errorf("Read once closed = %+v, want 3 blank", got)
+	}
+}
+
+// A reader's place in a log with no state is not looked for among the rotated files, as a stored state is: after that
+// log is deleted, the reader takes the next one from its start and no rotated file.
+func TestFirstReadDeleted(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, "\n")
+	logReader := reader(t, db, path)
+	read(t, logReader)
+	writeLog(t, path+".1", "\n\n\n") // it starts as the log does
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	read(t, logReader)
+	writeLog(t, path, "\n")
+
+	if got := read(t, logReader); got != (Result{Blank: 1}) {
+		t.Errorf("Read of the next log = %+v, want 1 blank", got)
 	}
 }
 
 // A first read of entries that are not accesses, as in Caddy's runtime log, writes nothing and warns. Later reads warn
-// no more and start the log over until one counts an access line.
+// no more and take only the new lines; the last counts an access line.
 func TestFirstReadNotAccess(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "caddy.log")
@@ -512,21 +598,19 @@ func TestFirstReadNotAccess(t *testing.T) {
 
 	logReader := loggedReader(t, db, path, logparse.ParseCaddyJSON, &logged)
 
-	if got := read(t, logReader); got != (Result{NotAccess: 1}) {
-		t.Errorf("first read = %+v, want 1 not an access", got)
-	}
+	for range 2 {
+		if got := read(t, logReader); got != (Result{NotAccess: 1}) {
+			t.Errorf("Read = %+v, want 1 not an access", got)
+		}
 
-	appendLog(t, path, runtimeEntry)
-
-	if got := read(t, logReader); got != (Result{NotAccess: 2}) {
-		t.Errorf("second read = %+v, want 2 not an access", got)
+		appendLog(t, path, runtimeEntry)
 	}
 
 	appendLog(t, path, `{"ts":946684800,"request":{"method":"GET","uri":"/","host":"h","remote_ip":"192.0.2.1"},`+
 		`"status":200}`+"\n")
 
-	if got := read(t, logReader); got != (Result{Counted: 1, NotAccess: 2}) || hits(t, db) != 1 {
-		t.Errorf("third read = %+v, %d hits; want 1 counted, 2 not an access and 1 hit", got, hits(t, db))
+	if got := read(t, logReader); got != (Result{Counted: 1, NotAccess: 1}) || hits(t, db) != 1 {
+		t.Errorf("third read = %+v, %d hits; want 1 counted, 1 not an access and 1 hit", got, hits(t, db))
 	}
 
 	if warnings := strings.Count(logged.String(), noAccessWarning(path)); warnings != 1 {
@@ -788,17 +872,19 @@ func TestRotateTwice(t *testing.T) {
 	}
 }
 
-// With no state yet, a read after a rotation keeps the new log, so the next read does not take the old one again.
+// With no state yet, a read after a rotation takes what the old log gained after the reader's place, then the new log,
+// which it keeps: the next read goes on in it.
 func TestRotateNoState(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")
 	writeLog(t, path, "\n")
 	logReader := reader(t, db, path)
 	read(t, logReader)
+	appendLog(t, path, "\n")
 	rename(t, path, path+".1")
 	writeLog(t, path, "\n\n")
 
-	for _, want := range []Result{{Blank: 3}, {Blank: 2}} {
+	for _, want := range []Result{{Blank: 3}, {}} {
 		if got := read(t, logReader); got != want {
 			t.Errorf("Read = %+v, want %+v", got, want)
 		}

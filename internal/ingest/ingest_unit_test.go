@@ -23,8 +23,10 @@ package ingest
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"hash/fnv"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -289,6 +291,59 @@ func TestNewDefaultHost(t *testing.T) {
 
 		if r.host != want {
 			t.Errorf("the default host %q became %q, want %q", in, r.host, want)
+		}
+	}
+}
+
+// A line's report says what became of it, with a dropped line's method, an unreadable one's parser error, if any, and a
+// rotated file's name; below the debug level it builds nothing.
+func TestTell(t *testing.T) {
+	var logged bytes.Buffer
+
+	options := DefaultOptions()
+	options.Log = slog.New(slog.NewTextHandler(&logged, nil))
+
+	quiet, err := New(nil, "/logs/access.log", logparse.ParseNCSA, options)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, errBad := t.Context(), errors.New("bad")
+
+	allocs := testing.AllocsPerRun(100, func() {
+		quiet.tell(ctx, "access.log.1", line{start: 1000}, 1000, malformed, "TRACE", errBad)
+	})
+	if allocs != 0 || logged.Len() != 0 {
+		t.Errorf("below the debug level: %v allocations, logged %q; want none", allocs, logged.String())
+	}
+
+	options.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	loud, err := New(nil, "/logs/access.log", logparse.ParseNCSA, options)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for _, tc := range []struct {
+		judged  fate
+		rotated string
+		why     error
+		want    string
+	}{
+		{blank, "", nil, `msg="line skipped" path=/logs/access.log line=7 offset=70 reason=blank`},
+		{blank, "access.log.1", nil, `msg="line skipped" path=/logs/access.log line=7 offset=70 reason=blank ` +
+			"file=access.log.1"},
+		{dropped, "", nil, `msg="line dropped" path=/logs/access.log line=7 offset=70 reason="method not counted" ` +
+			"method=TRACE"},
+		{malformed, "", errBad, `msg="line unreadable" path=/logs/access.log line=7 offset=70 reason=malformed ` +
+			"error=bad"},
+		{binary, "", nil, `msg="line unreadable" path=/logs/access.log line=7 offset=70 reason=binary`},
+	} {
+		logged.Reset()
+		loud.tell(ctx, tc.rotated, line{start: 70}, 7, tc.judged, "TRACE", tc.why)
+
+		if got, want := logged.String(), "level=DEBUG "+tc.want+"\n"; !strings.HasSuffix(got, want) {
+			t.Errorf("the report of a line %v in %q = %q, want it to end in %q", tc.judged, tc.rotated, got, want)
 		}
 	}
 }
