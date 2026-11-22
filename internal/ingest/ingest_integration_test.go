@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -331,7 +332,8 @@ func TestLongLastLine(t *testing.T) {
 }
 
 // Each line not counted adds to its own counter and is told once at debug level with its offset and reason, never with
-// its content; a counted one is not told.
+// its content; a counted one is not told. A line dated 24 hours ahead of the read counts, and one a second later does
+// not.
 func TestReasons(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")
@@ -342,8 +344,8 @@ func TestReasons(t *testing.T) {
 		strings.Repeat("x", maxLine+1),
 		"192.0.2.1 garbage",
 		ncsa("192.0.2.1", "TRACE", "/", base),
-		ncsa("192.0.2.1", "GET", "/", base.Add(ahead)),
-		ncsa("192.0.2.1", "GET", "/", base.Add(ahead+time.Second)),
+		ncsa("192.0.2.1", "GET", "/", base.Add(24*time.Hour)),
+		ncsa("192.0.2.1", "GET", "/", base.Add(24*time.Hour+time.Second)),
 		ncsa("192.0.2.1", "GET", "/", base.AddDate(-1001, 0, 0)),
 	}
 	writeLog(t, path, strings.Join(lines, "\n")+"\n")
@@ -895,19 +897,26 @@ func TestRotateNoState(t *testing.T) {
 	}
 }
 
+// Returns the state of no line read that keeps the last line of gets(0, lines).
+func noLineState(t *testing.T, lines int) kvstore.LogState {
+	t.Helper()
+
+	last, _, _, err := next(bufio.NewReader(strings.NewReader(gets(lines-1, 1))), 0)
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+
+	return kvstore.LogState{Offset: int64(len(gets(0, lines-1))), Sum: last.sum}
+}
+
 // A state of no line read takes the log from its start, even when its first line has the state's checksum.
 func TestNoLineState(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")
 	writeLog(t, path, gets(0, 1))
 
-	first, _, _, err := next(bufio.NewReader(strings.NewReader(gets(0, 1))), 0)
-	if err != nil {
-		t.Fatalf("next: %v", err)
-	}
-
 	batch := db.NewBatch(kvstore.DefaultOptions())
-	batch.SetState(path, kvstore.LogState{Sum: first.sum})
+	batch.SetState(path, noLineState(t, 1))
 
 	if _, err := db.Flush(batch); err != nil {
 		t.Fatalf("Flush: %v", err)
@@ -956,9 +965,9 @@ func TestFailedReadCloses(t *testing.T) {
 	}
 }
 
-// After a rotation into a log with no whole line yet, a read records that log with no line read, keeps it and lets the
-// old file go, whether or not it took lines of the old file. Once the new log has whole lines, the next read takes them
-// all, even when that log begins as the old one did.
+// After a rotation into a log with no whole line yet, a read records that log with no line read and the old file's last
+// line read, keeps the new log and lets the old file go, whether or not it took lines of the old file. Once the new log
+// has whole lines, the next read takes them all, even when that log begins as the old one did.
 func TestRotateNoWholeLine(t *testing.T) {
 	for _, gained := range []int{0, 1} {
 		db := openStore(t)
@@ -976,6 +985,11 @@ func TestRotateNoWholeLine(t *testing.T) {
 				"one %d; want %d counted, 0 and 1", gained, got, old, current, gained)
 		}
 
+		want := noLineState(t, 1+gained)
+		if state, _, err := db.State(path); state != want || err != nil {
+			t.Errorf("%d gained: state after the rotation = %+v, %v; want %+v", gained, state, err, want)
+		}
+
 		appendLog(t, path, "\n"+gets(1, 1))
 
 		if got := read(t, logReader); got != (Result{Counted: 2}) || hits(t, db) != int64(3+gained) {
@@ -984,8 +998,8 @@ func TestRotateNoWholeLine(t *testing.T) {
 	}
 }
 
-// A read after a rotation by rename takes what the old file gained, then the new log from its start, and goes on in the
-// new one; what the old file gains after that is lost.
+// A read after a rotation by rename takes what the old file gained, then the new log from its start, even when it
+// begins as the old one did, and goes on in the new one; what the old file gains after that is lost.
 func TestRotateRename(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")
@@ -994,17 +1008,17 @@ func TestRotateRename(t *testing.T) {
 	read(t, logReader)
 	appendLog(t, path, gets(2, 1))
 	rename(t, path, path+".1")
-	writeLog(t, path, gets(3, 2))
+	writeLog(t, path, gets(0, 3))
 
-	if got := read(t, logReader); got != (Result{Counted: 3}) || hits(t, db) != 5 {
-		t.Errorf("Read after the rotation = %+v, %d hits; want 3 counted, 5 hits", got, hits(t, db))
+	if got := read(t, logReader); got != (Result{Counted: 4}) || hits(t, db) != 6 {
+		t.Errorf("Read after the rotation = %+v, %d hits; want 4 counted, 6 hits", got, hits(t, db))
 	}
 
 	appendLog(t, path+".1", gets(5, 1))
 	appendLog(t, path, gets(6, 1))
 
-	if got := read(t, logReader); got != (Result{Counted: 1}) || hits(t, db) != 6 {
-		t.Errorf("next Read = %+v, %d hits; want 1 counted, 6 hits", got, hits(t, db))
+	if got := read(t, logReader); got != (Result{Counted: 1}) || hits(t, db) != 7 {
+		t.Errorf("next Read = %+v, %d hits; want 1 counted, 7 hits", got, hits(t, db))
 	}
 }
 
@@ -1070,6 +1084,62 @@ func TestDeleted(t *testing.T) {
 
 	if got := read(t, logReader); got != (Result{Counted: 1}) || hits(t, db) != 3 {
 		t.Errorf("Read of a new log = %+v, %d hits; want 1 counted, 3 hits", got, hits(t, db))
+	}
+}
+
+// A read after the log it keeps was deleted and a new one written at its path takes what the old one gained, then the
+// new log from its start, which it keeps, and lets the old one go.
+func TestDeletedReplaced(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, gets(0, 1))
+	logReader := reader(t, db, path)
+	read(t, logReader)
+	appendLog(t, path, gets(1, 1))
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	writeLog(t, path, gets(2, 1))
+
+	if got := read(t, logReader); got != (Result{Counted: 2}) || hits(t, db) != 3 {
+		t.Errorf("Read after the log was replaced = %+v, %d hits; want 2 counted, 3 hits", got, hits(t, db))
+	}
+
+	if old, current := opened(t, path+" (deleted)"), opened(t, path); old != 0 || current != 1 {
+		t.Errorf("the deleted log is open %d times after the read and the new one %d; want 0 and 1", old, current)
+	}
+}
+
+// While the path of a deleted log fails to open for another reason than naming no file, a read fails with that reason
+// and keeps the log; once the path names no file, a read takes what it gained.
+func TestDeletedPathFails(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, gets(0, 1))
+	logReader := reader(t, db, path)
+	read(t, logReader)
+	appendLog(t, path, gets(1, 1))
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	if err := os.Symlink(path, path); err != nil { // a link to itself fails to open, for root too
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if result, err := logReader.Read(t.Context()); result != (Result{}) || !errors.Is(err, syscall.ELOOP) {
+		t.Errorf("Read with a path that links to itself = %+v, %v; want nothing, syscall.ELOOP", result, err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	if got := read(t, logReader); got != (Result{Counted: 1}) || hits(t, db) != 2 {
+		t.Errorf("next Read = %+v, %d hits; want 1 counted, 2 hits", got, hits(t, db))
 	}
 }
 

@@ -215,11 +215,11 @@ func TestBroadcast(t *testing.T) {
 
 // A stream sends its headers and an update at once, and another after a broadcast, each under a write deadline it
 // clears once flushed. It ends when its client leaves, with a deadline for the server's last write. Each deadline is
-// the hub's write timeout away, writeTimeout in a new hub.
+// the hub's write timeout away, 10 seconds in a new hub.
 func TestServe(t *testing.T) {
 	h := NewHub(Options{Keepalive: time.Hour, MaxStreams: 1})
-	if h.writeTimeout != writeTimeout {
-		t.Errorf("write timeout of a new hub %v, want %v", h.writeTimeout, writeTimeout)
+	if h.writeTimeout != 10*time.Second {
+		t.Errorf("write timeout of a new hub %v, want 10s", h.writeTimeout)
 	}
 
 	h.writeTimeout = time.Minute

@@ -79,6 +79,13 @@ func follow(t *testing.T, interval time.Duration, steps ...step) (logged string,
 	return buf.String(), changes
 }
 
+// Unless told otherwise, kirika reads a followed log every 2 seconds.
+func TestDefaultInterval(t *testing.T) {
+	if DefaultInterval != 2*time.Second {
+		t.Errorf("DefaultInterval = %v, want 2s", DefaultInterval)
+	}
+}
+
 // onChange follows each read that counted a line, failed or not, and no other: a failed read keeps the chunks it
 // flushed.
 func TestRunChanges(t *testing.T) {
@@ -208,6 +215,7 @@ func TestRunReport(t *testing.T) {
 		`dropped=6 malformed=0`: 1,
 		`level=DEBUG msg="lines read" counted=2 closed_year_pages=0`:                    1,
 		`level=WARN msg="pages of a closed year" counted=2 closed_year_pages=1 blank=0`: 1,
+		`level=WARN msg="unreadable lines" counted=1 closed_year_pages=1 blank=0`:       1,
 		"\n": 8,
 	} {
 		if got := strings.Count(logged, text); got != want {

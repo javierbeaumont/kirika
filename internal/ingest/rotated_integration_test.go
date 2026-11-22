@@ -89,6 +89,29 @@ func readOnce(t *testing.T, db *kvstore.DB, path string) {
 	}
 }
 
+// A new reader whose log still holds the last line read takes nothing and looks in no rotated file, so it does not
+// warn.
+func TestRestartSameLog(t *testing.T) {
+	db := openStore(t)
+	path := filepath.Join(t.TempDir(), "access.log")
+	writeLog(t, path, gets(0, 2))
+	readOnce(t, db, path)
+
+	var logged bytes.Buffer
+
+	logReader := debugReader(t, db, path, &logged)
+
+	for range 2 {
+		if got := read(t, logReader); got != (Result{}) || hits(t, db) != 2 {
+			t.Errorf("Read of a new reader = %+v, %d hits; want nothing, 2 hits", got, hits(t, db))
+		}
+	}
+
+	if strings.Contains(logged.String(), "level=WARN") {
+		t.Errorf("warned:\n%s", logged.String())
+	}
+}
+
 // A new reader whose log was rotated while none ran takes the rest of the rotated file first, then the new log; its
 // reports of a rotated file's lines name that file and give the line's number in it, and those of the new log's name no
 // file.
@@ -229,6 +252,45 @@ func TestRotatedAfterDeleted(t *testing.T) {
 	}
 }
 
+// A read that lets a deleted log go records the state of no line read with that log's last line read, in that read or
+// an earlier one. A new reader finds that line in the compressed copy a rotation left of the log, and takes each log
+// written since.
+func TestRestartAfterDeleted(t *testing.T) {
+	for _, gained := range []int{0, 1} {
+		db := openStore(t)
+		path := filepath.Join(t.TempDir(), "access.log")
+		writeLog(t, path, gets(0, 1))
+		logReader := reader(t, db, path)
+		read(t, logReader)
+		appendLog(t, path, gets(1, gained))
+		writeGzip(t, path+".1.gz", gets(0, 1+gained))
+
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("remove: %v", err)
+		}
+
+		read(t, logReader)
+
+		want := noLineState(t, 1+gained)
+		if state, _, err := db.State(path); state != want || err != nil {
+			t.Errorf("%d gained: state after the deleted log = %+v, %v; want %+v", gained, state, err, want)
+		}
+
+		if err := logReader.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		rename(t, path+".1.gz", path+".2.gz")
+		writeLog(t, path+".1", gets(2, 1))
+		writeLog(t, path, gets(3, 1))
+
+		if got := read(t, reader(t, db, path)); got != (Result{Counted: 2}) || hits(t, db) != int64(3+gained) {
+			t.Errorf("%d gained: Read of a new reader = %+v, %d hits; want 2 counted, %d hits", gained, got,
+				hits(t, db), 3+gained)
+		}
+	}
+}
+
 // Once no rotated file holds the line a state of no line read names, the state names none, and a new reader looks in no
 // rotated file.
 func TestRotatedNothingBefore(t *testing.T) {
@@ -250,7 +312,9 @@ func TestRotatedNothingBefore(t *testing.T) {
 		t.Errorf("state = %+v, %v, %v; want %+v", state, ok, err, noLineBefore)
 	}
 
-	writeLog(t, path+".1", gets(1, 1))
+	if err := os.Symlink(path+".1", path+".1"); err != nil { // a rotated file whose opening fails with a warning
+		t.Fatalf("symlink: %v", err)
+	}
 
 	var logged bytes.Buffer
 
