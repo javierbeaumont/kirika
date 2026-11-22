@@ -57,6 +57,7 @@ type Options struct {
 	Methods     []string         // the methods whose lines count; a line with another is dropped
 	NoUserAgent bool             // the log carries no User-Agent, even where a line seems to hold an empty one
 	Now         func() time.Time // the clock of the 24 hours a line may be ahead; nil is time.Now
+	Rotated     []string         // globs of the log's rotated files from its directory; nil is logrotate's and Caddy's
 }
 
 // DefaultOptions returns the rules kirika reads with unless told otherwise.
@@ -102,13 +103,14 @@ type Reader struct {
 	methods map[string]bool
 	now     func() time.Time
 	parse   logparse.Parser
-	path    string // absolute, the key of the log's state
-	warned  bool   // that the log has no access line yet
+	path    string   // absolute, the key of the log's state
+	rotated []string // absolute globs
+	warned  bool     // that the log has no access line yet
 }
 
 // New returns a reader of the log at path that parses its lines with parse and counts them into db by the rules of
-// options. It refuses counting rules that kvstore.Options.Check refuses, a nil parser, an empty method list and a
-// method that is empty or not in upper case.
+// options. It refuses counting rules that kvstore.Options.Check refuses, a nil parser, an empty method list, a method
+// that is empty or not in upper case and a malformed glob of rotated files.
 func New(db *kvstore.DB, path string, parse logparse.Parser, options Options) (*Reader, error) {
 	if err := options.check(parse); err != nil {
 		return nil, err
@@ -133,6 +135,19 @@ func New(db *kvstore.DB, path string, parse logparse.Parser, options Options) (*
 
 	for _, method := range options.Methods {
 		reader.methods[method] = true
+	}
+
+	rotated := options.Rotated
+	if rotated == nil {
+		rotated = defaultRotated(filepath.Base(absolute))
+	}
+
+	for _, pattern := range rotated {
+		if !filepath.IsAbs(pattern) {
+			pattern = filepath.Join(escapeGlob(filepath.Dir(absolute)), pattern)
+		}
+
+		reader.rotated = append(reader.rotated, pattern)
 	}
 
 	if options.NoUserAgent {
@@ -179,6 +194,12 @@ func (o Options) check(parse logparse.Parser) error {
 		}
 	}
 
+	for _, pattern := range o.Rotated {
+		if _, err := filepath.Match(pattern, ""); err != nil {
+			return fmt.Errorf("ingest: rotated files %q: %w", pattern, err)
+		}
+	}
+
 	return nil
 }
 
@@ -187,13 +208,16 @@ func (o Options) check(parse logparse.Parser) error {
 // still at its offset, and else reads the log from its start: the path holds a new one. When the path names another
 // file than the one the reader keeps open, as after a rotation by rename, it first reads what the old file gained, then
 // the new one from its start, and keeps the new one; one with no whole line yet gets the state of no line read. When
+// the reader keeps no file, as a new one, and the path's file does not hold the state's line, it first reads the rest
+// of the rotated file that does, then each newer one, oldest first, as Options.Rotated finds them. A state of no line
+// read may name the last line of the log before. It warns if no rotated file holds a line of the log read last. When
 // the path names no file and the one kept open has no name left, it reads what that one gained and releases it. A last
 // line with no newline yet waits for the next read. A read with no new line writes nothing, unless it moves to a new
-// log. The first read of a path, which has no state yet, writes nothing unless it finds a readable line, counted or
-// dropped, and fails with ErrUnreadable if it finds an unreadable one instead. If it finds only lines of neither kind,
-// it warns once per reader. Any other read skips unreadable lines. Once ctx ends, a read fails with ctx's error before
-// its next line. A failed read keeps what it flushed and the file of its last flush, else the old one; its Result
-// counts the lines it read before the error.
+// log or releases a deleted one; either records the state of no line read. The first read of a path, which has no state
+// yet, writes nothing unless it finds a readable line, counted or dropped, and fails with ErrUnreadable if it finds an
+// unreadable one instead. If it finds only lines of neither kind, it warns once per reader. Any other read skips
+// unreadable lines. Once ctx ends, a read fails with ctx's error before its next line. A failed read keeps what it
+// flushed and the file of its last flush, else the old one; its Result counts the lines it read before the error.
 func (r *Reader) Read(ctx context.Context) (Result, error) {
 	var progress scan
 
@@ -214,6 +238,9 @@ func (r *Reader) Read(ctx context.Context) (Result, error) {
 	}
 
 	err = r.readAll(ctx, file, state, hasState, &progress)
+	if err == nil && gone {
+		moveTo(nil, lastOr(progress.last, state), &progress)
+	}
 
 	switch {
 	case err != nil:
@@ -281,9 +308,9 @@ func (r *Reader) open() (*os.File, error) {
 // What a read found, across the files it read.
 type scan struct {
 	batch    *kvstore.Batch
-	file     *os.File         // last's file
+	file     *os.File         // last's file, nil for a rotated file's
 	last     kvstore.LogState // the last line read, or none in a log moved to
-	moved    bool             // the read went on from the file kept open to a new one
+	moved    bool             // the read moved to a new log, or released a deleted one
 	pending  int              // the lines read since the last flush
 	readable bool             // a line counted or dropped
 	refused  error            // ErrUnreadable, naming the first unreadable line
@@ -312,7 +339,8 @@ func (r *Reader) flush(progress *scan) error {
 }
 
 // Reads file into progress as readFile does. When r.file is another file, it reads r.file first, then file from its
-// start.
+// start. When the reader keeps no file and file does not hold state's line, it first reads the rotated files after that
+// line, as readRotated does, then file from its start.
 func (r *Reader) readAll(ctx context.Context, file *os.File, state kvstore.LogState, hasState bool,
 	progress *scan,
 ) error {
@@ -324,30 +352,76 @@ func (r *Reader) readAll(ctx context.Context, file *os.File, state kvstore.LogSt
 			return err
 		}
 
-		// The new log, with no line read yet, which the next read takes from its start until a line of it is flushed.
-		progress.file, progress.last, progress.moved = file, kvstore.LogState{}, true
+		moveTo(file, lastOr(progress.last, state), progress)
+
 		hasState = false
 	}
 
-	return r.readFile(ctx, file, state, hasState, limit, progress)
-}
-
-// Reads file into progress, after state's line when hasState and that line is still there, else from its start. Lines
-// dated after limit are unreadable.
-func (r *Reader) readFile(ctx context.Context, file *os.File, state kvstore.LogState, hasState bool, limit time.Time,
-	progress *scan,
-) error {
-	fileReader, offset, lineNum, err := resume(file, state, hasState)
+	lines, offset, lineNum, err := resume(file, state, hasState)
 	if err != nil {
 		return err
 	}
 
+	if r.file == nil && hasState && lineNum == 0 && state.Offset >= 0 {
+		found, err := r.readRotated(ctx, file, state, limit, progress)
+		if err != nil {
+			return err
+		}
+
+		before := noLineBefore
+		if found {
+			before = lastOr(progress.last, state)
+		}
+
+		moveTo(file, before, progress)
+	}
+
+	return r.readLines(ctx, file, "", lines, offset, lineNum, limit, progress)
+}
+
+// The state of no line read with no line before it to look for.
+var noLineBefore = kvstore.LogState{Offset: -1}
+
+// Starts progress on file, a log with no line read yet, which the next read takes from its start until a line of it is
+// flushed; nil is the log to come after a deleted one. Its state of no line read keeps the offset and checksum of
+// before, the last line read of the log before, so that a new reader can find that line among the rotated files once
+// the log after is rotated in its turn.
+func moveTo(file *os.File, before kvstore.LogState, progress *scan) {
+	progress.file, progress.last, progress.moved = file, kvstore.LogState{Offset: before.Offset, Sum: before.Sum}, true
+}
+
+// Returns last when it names a line read, else state.
+func lastOr(last, state kvstore.LogState) kvstore.LogState {
+	if last.Line > 0 {
+		return last
+	}
+
+	return state
+}
+
+// Reads file into progress, after state's line when hasState and that line is still there, else from its start.
+func (r *Reader) readFile(ctx context.Context, file *os.File, state kvstore.LogState, hasState bool, limit time.Time,
+	progress *scan,
+) error {
+	lines, offset, lineNum, err := resume(file, state, hasState)
+	if err != nil {
+		return err
+	}
+
+	return r.readLines(ctx, file, "", lines, offset, lineNum, limit, progress)
+}
+
+// Reads lines into progress, from offset, after line number lineNum. They come from file, which a flush keeps open, or
+// from the rotated file named rotated, when file is nil. Lines dated after limit are unreadable.
+func (r *Reader) readLines(ctx context.Context, file *os.File, rotated string, lines *bufio.Reader, offset,
+	lineNum int64, limit time.Time, progress *scan,
+) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		logLine, size, more, err := next(fileReader, offset)
+		logLine, size, more, err := next(lines, offset)
 		if err != nil {
 			return err
 		}
@@ -370,17 +444,17 @@ func (r *Reader) readFile(ctx context.Context, file *os.File, state kvstore.LogS
 
 			progress.readable = true
 		case judged == dropped:
-			r.tell("line dropped", logLine, lineNum, judged, "method", event.Method)
+			r.tell("line dropped", rotated, logLine, lineNum, judged, "method", event.Method)
 
 			progress.readable = true
 		case judged.unreadable():
-			r.tell("line unreadable", logLine, lineNum, judged, "error", why)
+			r.tell("line unreadable", rotated, logLine, lineNum, judged, "error", why)
 
 			if progress.refused == nil {
 				progress.refused = unreadable(lineNum, judged, why)
 			}
 		default:
-			r.tell("line skipped", logLine, lineNum, judged)
+			r.tell("line skipped", rotated, logLine, lineNum, judged)
 		}
 
 		if progress.pending >= r.chunk && (progress.stated || progress.readable) {
@@ -400,10 +474,15 @@ func unreadable(num int64, f fate, why error) error {
 	return fmt.Errorf("%w; line %d is %v", ErrUnreadable, num, f)
 }
 
-// Tells at debug level what became of line number num, which was not counted, never its content: it holds a client
-// address.
-func (r *Reader) tell(msg string, l line, num int64, f fate, attrs ...any) {
-	r.log.Debug(msg, append([]any{"path", r.path, "line", num, "offset", l.start, "reason", f.String()}, attrs...)...)
+// Tells at debug level what became of line number lineNum, which was not counted, never its content: it holds a client
+// address. rotated names the rotated file it is in, if any.
+func (r *Reader) tell(msg, rotated string, logLine line, lineNum int64, judged fate, attrs ...any) {
+	if rotated != "" {
+		attrs = append(attrs, "file", rotated)
+	}
+
+	r.log.Debug(msg, append([]any{"path", r.path, "line", lineNum, "offset", logLine.start, "reason", judged.String()},
+		attrs...)...)
 }
 
 // Places a reader of f after the line s names, when ok and s names a line that is still there; else at the start of f,

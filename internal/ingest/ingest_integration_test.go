@@ -779,7 +779,8 @@ func TestRotateTwice(t *testing.T) {
 	writeLog(t, path, "")
 	read(t, logReader)
 	appendLog(t, path, gets(1, 2))
-	rename(t, path, path+".2")
+	rename(t, path+".1", path+".2")
+	rename(t, path, path+".1")
 	writeLog(t, path, gets(3, 1))
 
 	if got := read(t, logReader); got != (Result{Counted: 3}) || hits(t, db) != 4 {
