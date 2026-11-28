@@ -1,7 +1,24 @@
 # kirika
 
-A single static Go binary that turns HTTP access logs into private, self-hosted analytics. No JavaScript beacons, no
-third-party trackers.
+A single static Go binary that turns HTTP access logs into private, self-hosted analytics.
+
+## What sets it apart
+
+- **No tracking code.** It reads the access logs your server already writes: no JavaScript, no cookies.
+- **No IP addresses on disk.** Visitors and visits are counted through keyed hashes. A copy of the store still needs the
+  care the logs need.
+- **Small.** One binary and one data file, with no database server, built for modest machines such as a Raspberry Pi.
+  The store keeps counters, not requests, so it grows with the different paths and referrers it sees rather than with
+  your traffic.
+- **Live.** It follows the log as it grows and tells the dashboard when the numbers change.
+
+## Status
+
+There is no release yet and nothing to run. Reading logs, counting and storing are written and tested.
+
+## Development
+
+[CONTRIBUTING.md](CONTRIBUTING.md) says how to build and test kirika.
 
 ## Architecture Decision Records
 
