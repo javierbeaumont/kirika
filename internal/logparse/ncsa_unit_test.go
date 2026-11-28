@@ -130,6 +130,7 @@ func TestParseNCSAErrors(t *testing.T) {
 		{prefix + ` 200 1 "https://r.example`, "ncsa: referer has no closing quote at offset 84"},
 		{prefix + ` 200 1 "-" "Mozilla`, "ncsa: user agent has no closing quote at offset 78"},
 		{prefix + ` 200 1 "-" "ua\x4`, "ncsa: user agent has no closing quote at offset 76"},
+		{prefix + ` 200 1 "-" "ua\u004`, "ncsa: user agent has no closing quote at offset 78"},
 		{prefix + ` 200 1 "-" "ua\`, "ncsa: user agent has no closing quote at offset 74"},
 	} {
 		if _, err := ParseNCSA([]byte(tc.line)); err == nil || err.Error() != tc.want {
@@ -305,6 +306,8 @@ func TestParseNCSALeapSecond(t *testing.T) {
 	}
 }
 
+// A quoted field decodes \xHH to its byte, \u00HH to its character, C's one-letter escapes to theirs and any other to
+// the character after its backslash.
 func TestParseNCSAEscapes(t *testing.T) {
 	for _, tc := range []struct{ field, want string }{
 		{`\x22quoted\x22`, `"quoted"`},
@@ -314,6 +317,11 @@ func TestParseNCSAEscapes(t *testing.T) {
 		{`C:\\dev`, `C:\dev`},
 		{`\a\b\f\n\r\t\v`, "\a\b\f\n\r\t\v"},
 		{`\\ \" \q \\n`, `\ " q \n`},
+		{`\u0000\u001f\u001F`, "\x00\x1f\x1f"},
+		{`\u0041\u00e9`, "A\u00e9"},
+		{`\u00`, "u00"},
+		{`\u004`, "u004"},
+		{`\u00G1\u0100\u1041\U0041`, "u00G1u0100u1041U0041"},
 	} {
 		line := `1.2.3.4 - - [01/Jan/2000:00:00:00 +0000] "GET / HTTP/1.1" 200 1 "-" "` + tc.field + `"`
 

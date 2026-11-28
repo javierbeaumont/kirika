@@ -281,9 +281,9 @@ func timeEnd(rest string) int {
 	return len(rest)
 }
 
-// Reads a "..." field and decodes its escapes: \xHH is the byte HH (how Apache and nginx log non-printable bytes), and
-// unescape decodes any other. quoted is false on an error or when no quoted field follows (a Common-format line has no
-// referer/user-agent).
+// Reads a "..." field and decodes its escapes: \xHH is the byte HH (how Apache and nginx log non-printable bytes),
+// \u00HH the character U+00HH (how nginx's escape=json logs a control character), and unescape decodes any other.
+// quoted is false on an error or when no quoted field follows (a Common-format line has no referer/user-agent).
 func (sc *clfScanner) quote(field string) (value string, quoted bool) {
 	if sc.err != nil {
 		return "", false
@@ -306,6 +306,11 @@ func (sc *clfScanner) quote(field string) (value string, quoted bool) {
 			decoded.WriteByte(unhex(sc.s[sc.i+2])<<4 | unhex(sc.s[sc.i+3]))
 
 			sc.i += 4
+		case char == '\\' && sc.i+5 < len(sc.s) && sc.s[sc.i+1:sc.i+4] == "u00" && isHex(sc.s[sc.i+4]) &&
+			isHex(sc.s[sc.i+5]):
+			decoded.WriteRune(rune(unhex(sc.s[sc.i+4])<<4 | unhex(sc.s[sc.i+5])))
+
+			sc.i += 6
 		case char == '\\' && sc.i+1 < len(sc.s):
 			decoded.WriteByte(unescape(sc.s[sc.i+1]))
 			sc.i += 2
