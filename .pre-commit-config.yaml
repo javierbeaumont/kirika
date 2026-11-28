@@ -35,13 +35,6 @@ repos:
         args: [--license-filepath=tools/license-header.txt, --comment-style=#]
   - repo: local
     hooks:
-      - id: golangci-lint
-        name: golangci-lint (Docker)
-        entry: make lint
-        language: system
-        types: [go]
-        pass_filenames: false
-        require_serial: true
       - id: go-mod-tidy
         name: go mod tidy (Docker)
         entry: make tidy
@@ -49,24 +42,42 @@ repos:
         files: '\.go$|^go\.(mod|sum)$'
         pass_filenames: false
         require_serial: true
+      - id: golangci-lint
+        name: golangci-lint (Docker)
+        entry: make lint
+        language: system
+        files: '\.go$|^(\.golangci\.yml|Makefile|docker-compose\.yml|go\.(mod|sum))$'
+        pass_filenames: false
+        require_serial: true
+      # Go reads a build line only before the package clause. The tier comes first in it, and the rest only narrows it.
+      - id: integration-tag
+        name: integration test files carry the integration tag
+        entry: '\A(?:(?://[^\n]*)?\n)*//go:build integration(?: && [^\n|]+)?\n'
+        language: pygrep
+        args: [--multiline, --negate]
+        files: '_integration_test\.go$'
+      # A tab counts as 4 columns; editorconfig-checker counts it as 1.
+      - id: makefile-width
+        name: Makefile lines fit in 120 columns
+        entry: >-
+          awk '{ line = $0; gsub(/\t/, "    ", line); if (length(line) > 120) { print FILENAME ":" FNR; wide = 1 } } END
+          { exit wide }'
+        language: system
+        files: '(^|/)Makefile$'
+      # A name that goes on in lower case is no test, nor is a TestMain that takes a *testing.M.
       - id: test-helpers
         name: test files outside a tier hold no test
-        entry: '^func (Test|Benchmark|Fuzz|Example)'
+        entry: '^func (Test(?!Main\((\w+ )?\*testing\.M\))|Benchmark|Fuzz|Example)[^a-z]'
         language: pygrep
         files: '_test\.go$'
         exclude: '_(unit|integration)_test\.go$'
+      # The build line as in integration-tag.
       - id: unit-tag
         name: unit test files carry the unit tag
-        entry: '^//go:build unit$'
+        entry: '\A(?:(?://[^\n]*)?\n)*//go:build unit(?: && [^\n|]+)?\n'
         language: pygrep
-        args: [--negate]
+        args: [--multiline, --negate]
         files: '_unit_test\.go$'
-      - id: integration-tag
-        name: integration test files carry the integration tag
-        entry: '^//go:build integration$'
-        language: pygrep
-        args: [--negate]
-        files: '_integration_test\.go$'
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
     hooks:
@@ -96,4 +107,6 @@ repos:
   - repo: https://github.com/adrienverge/yamllint
     rev: v1.38.0
     hooks:
+      # Its warnings fail too.
       - id: yamllint
+        args: [--strict]

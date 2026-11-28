@@ -36,31 +36,6 @@ jobs:
       - name: Vet
         run: make vet
 
-  test:
-    name: Test (${{ matrix.tier }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        tier: [unit, integration]
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Log in to Docker Hub
-        env:
-          DOCKERHUB_PULL_TOKEN: ${{ secrets.DOCKERHUB_PULL_TOKEN }}
-          DOCKERHUB_USERNAME: ${{ github.repository_owner }}
-        run: |
-          if [ -n "$DOCKERHUB_PULL_TOKEN" ]; then
-            echo "$DOCKERHUB_PULL_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
-          fi
-
-      - name: Test
-        run: make test-${{ matrix.tier }}
-
   pre-commit:
     name: pre-commit
     runs-on: ubuntu-latest
@@ -88,7 +63,31 @@ jobs:
       - name: Run the hooks
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
 
+      # The step above installed pre-commit.
       - name: Scan the history for secrets
-        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        run: pre-commit run --hook-stage manual gitleaks-history --all-files
+
+  test:
+    name: Test (${{ matrix.tier }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [unit, integration]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          extra_args: --hook-stage manual gitleaks-history --all-files
+          persist-credentials: false
+
+      - name: Log in to Docker Hub
+        env:
+          DOCKERHUB_PULL_TOKEN: ${{ secrets.DOCKERHUB_PULL_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ github.repository_owner }}
+        run: |
+          if [ -n "$DOCKERHUB_PULL_TOKEN" ]; then
+            echo "$DOCKERHUB_PULL_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+          fi
+
+      - name: Test
+        run: make test-${{ matrix.tier }}

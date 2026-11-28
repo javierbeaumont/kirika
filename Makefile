@@ -20,6 +20,8 @@
 GO := docker compose run --rm go
 # No TTY: pre-commit gives hooks no terminal on stdin, which older Compose versions do not detect.
 LINT := docker compose run --rm -T lint
+# The systems vetted and linted: Linux and, for the files built only outside Unix, Windows.
+SYSTEMS := linux windows
 # The test tiers, each the build tag of its test files.
 TIERS := unit integration
 
@@ -37,7 +39,8 @@ fmt:
 
 # Applies the fixes the linters can make.
 lint:
-	$(LINT) sh -c 'for tier in $(TIERS); do golangci-lint run --fix --build-tags $$tier || exit; done'
+	$(LINT) sh -c 'for os in $(SYSTEMS); do for tier in $(TIERS); do GOOS=$$os golangci-lint run --fix --build-tags \
+		$$tier || exit; done; done'
 
 sh:
 	$(GO) sh
@@ -53,4 +56,5 @@ tidy:
 	docker compose run --rm -T go go mod tidy
 
 vet:
-	$(GO) sh -c 'for tier in $(TIERS); do go vet -tags $$tier ./... || exit; done'
+	$(GO) sh -c 'for os in $(SYSTEMS); do for tier in $(TIERS); do GOOS=$$os go vet -tags $$tier ./... || exit; done; \
+		done'

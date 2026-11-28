@@ -2,17 +2,16 @@
 services:
   go:
     image: golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb
-    working_dir: /src
     environment:
       CGO_ENABLED: "0"
     volumes:
       - ./:/src
       - gobuild:/root/.cache/go-build
       - gomod:/go/pkg/mod
+    working_dir: /src
 
   lint:
     image: golangci/golangci-lint:v2.15.0-alpine@sha256:2ba875b990f1d8501ad4ec19be1ea0701e316ec3a4b764f7b129f62f01318bbf
-    working_dir: /src
     environment:
       CGO_ENABLED: "0"
     volumes:
@@ -20,6 +19,7 @@ services:
       - gobuild:/root/.cache/go-build
       - golint:/root/.cache/golangci-lint
       - gomod:/go/pkg/mod
+    working_dir: /src
 
 volumes:
   gobuild:
