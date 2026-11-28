@@ -22,10 +22,11 @@ and be versioned, so that each update is a reviewable step.
 A substring heuristic for now, and a maintained library once kirika shows browsers, operating systems or named robots.
 The ADR that picks the library supersedes this one and decides whether the markers stay as a fallback.
 
-The heuristic looks for substring markers in the User-Agent, in any case: bot markers first, as crawlers can announce a
-phone, then mobile ones.
+The heuristic looks for markers in the User-Agent, ignoring case: bot markers first, as crawlers can announce a phone,
+then mobile ones.
 
 ## Consequences
 
 - No dependency to update or audit.
-- A heuristic: a client whose User-Agent has no marker, or hides what it is, is misclassified until a marker is added.
+- A heuristic: a bot or mobile client whose User-Agent has no marker counts as desktop until a marker is added, and a
+  client that poses as another is taken for it.

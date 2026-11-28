@@ -5,8 +5,8 @@ third-party trackers.
 
 ## Architecture Decision Records
 
-Significant technology choices are recorded as ADRs in [`docs/adr/`](docs/adr/): the context, the alternatives
-considered, the decision and its consequences.
+Significant decisions are recorded as ADRs in [`docs/adr/`](docs/adr/): the context, the alternatives considered, the
+decision and its consequences.
 
 | ADR                                              | Decision                                       |
 |--------------------------------------------------|------------------------------------------------|

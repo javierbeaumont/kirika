@@ -9,8 +9,9 @@ cloning, install the hooks once:
 pre-commit install
 ```
 
-They add the license header to new files, fix whitespace and line endings, lint the Go code (fixing what the linters
-can), and check spelling, secrets, line length, YAML and that every file declares its license.
+They add the license header to new Go, shell and Make files, fix whitespace and line endings, keep `go.mod` and `go.sum`
+tidy, lint the Go code (fixing what the linters can), and check spelling, secrets, line length, YAML and that every file
+has a license.
 
 ## Commands
 
@@ -24,20 +25,21 @@ can), and check spelling, secrets, line length, YAML and that every file declare
 | `make test`             | Run the unit and integration tests         |
 | `make test-integration` | Run the integration tests and count them   |
 | `make test-unit`        | Run the unit tests and count them          |
+| `make tidy`             | Match `go.mod` and `go.sum` to the imports |
 | `make vet`              | Report suspicious constructs with `go vet` |
 
 ## Tests
 
 Tests come in two tiers, run apart. A unit test has no real dependency: it may read a fixture from `testdata/`, but
-creates no file. An integration test uses a real store or file in a temporary directory. A test file names its tier and
-carries it as a build tag:
+creates no file. An integration test uses a real store or file in a temporary directory, or a real HTTP server. A test
+file names its tier and carries it as a build tag:
 
 | File                    | Build tag                |
 |-------------------------|--------------------------|
 | `*_integration_test.go` | `//go:build integration` |
 | `*_unit_test.go`        | `//go:build unit`        |
 
-A plain `*_test.go` holds the helpers both tiers use and no test. The hooks check all three. One test runs with its
+A plain `*_test.go` holds the helpers both tiers use and no test. The hooks check all three. To run one test, pass its
 tier's tag:
 
 ```sh

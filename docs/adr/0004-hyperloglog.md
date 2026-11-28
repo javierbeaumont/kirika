@@ -5,8 +5,9 @@
 ## Context
 
 Unique visitors are the distinct clients that requested at least one page in a period. Counting them exactly means
-keeping every client address of the period. A year must count once a visitor of several of its months, and a set of
-hosts a visitor of several hosts. The count must also answer each traffic filter of ADR-0003, such as humans only.
+keeping every client address of the period. A visitor of several months of a year must count once in the year, and a
+visitor of several hosts once across them. The count must also answer each traffic filter of ADR-0003, such as humans
+only.
 
 ## Alternatives considered
 
