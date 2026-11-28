@@ -86,7 +86,7 @@ func ParseCaddyJSON(line []byte) (Event, error) {
 		HasUserAgent: headers != nil,
 		Host:         VHost(entry.Request.Host),
 		Method:       entry.Request.Method,
-		Path:         unreserved(stripQuery(entry.Request.URI)),
+		Path:         stripQuery(entry.Request.URI),
 		Referer:      headerFirst(headers, "Referer"),
 		Size:         entry.Size,
 		Status:       entry.Status,

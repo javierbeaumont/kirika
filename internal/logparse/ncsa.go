@@ -129,7 +129,7 @@ func parseCLF(scanner *clfScanner) (Event, error) {
 		ClientIP:     clientAddr(client),
 		HasUserAgent: hasUserAgent,
 		Method:       method,
-		Path:         unreserved(stripQuery(target)),
+		Path:         stripQuery(target),
 		Referer:      referer,
 		Time:         requestTime.UTC(),
 		UserAgent:    userAgent,

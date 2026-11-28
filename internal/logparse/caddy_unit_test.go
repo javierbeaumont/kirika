@@ -334,7 +334,7 @@ func TestParseCaddyJSONPath(t *testing.T) {
 		{"*", "*"},
 		{"/a/b", "/a/b"},
 		{"/a?b=c?d", "/a"},
-		{"/%7Ea?%7E", "/~a"},
+		{"/%7Ea?%7E", "/%7Ea"},
 		{"?x", ""},
 	} {
 		line := fmt.Sprintf(`{"ts":946684800,"request":{"method":"GET","uri":%q},"status":200,"size":1}`, tc.uri)

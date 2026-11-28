@@ -63,15 +63,15 @@ func TestParseNCSACombined(t *testing.T) {
 	}
 }
 
-// A client loses its port and a path's unreserved characters are decoded.
+// A client loses its port, and a path keeps its escapes.
 func TestParseNCSANormalized(t *testing.T) {
 	got, err := ParseNCSA([]byte(`203.0.113.5:4711 - - [01/Jan/2000:00:00:00 +0000] "GET /%7Ea?%7E HTTP/1.1" 200 1`))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 
-	if got.ClientIP != "203.0.113.5" || got.Path != "/~a" {
-		t.Errorf("ClientIP, Path = %q, %q; want 203.0.113.5, /~a", got.ClientIP, got.Path)
+	if got.ClientIP != "203.0.113.5" || got.Path != "/%7Ea" {
+		t.Errorf("ClientIP, Path = %q, %q; want 203.0.113.5, /%%7Ea", got.ClientIP, got.Path)
 	}
 }
 

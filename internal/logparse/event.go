@@ -36,7 +36,7 @@ type Event struct {
 	HasUserAgent bool      // the log carries a User-Agent, empty or not
 	Host         string    // vhost as VHost returns it
 	Method       string    // HTTP method (GET, POST, ...)
-	Path         string    // URI without its query string, with unreserved characters decoded
+	Path         string    // URI without its query string, its escapes as the log wrote them
 	Referer      string    // Referer header
 	Size         int64     // response size in bytes as the log counts it, never negative
 	Status       int       // HTTP status code, 100-999, or 0 when the log has none
@@ -97,34 +97,4 @@ func VHost(host string) string {
 	default:
 		return net.JoinHostPort(name, port)
 	}
-}
-
-// Decodes the percent-encoded unreserved characters of a path: letters, digits and "-._~" mean the same either way (RFC
-// 3986, section 2.3). Any other escape stays as written.
-func unreserved(path string) string {
-	if !strings.Contains(path, "%") {
-		return path
-	}
-
-	var b strings.Builder
-
-	for i := 0; i < len(path); i++ {
-		if path[i] == '%' && i+2 < len(path) && isHex(path[i+1]) && isHex(path[i+2]) {
-			if c := unhex(path[i+1])<<4 | unhex(path[i+2]); isUnreserved(c) {
-				b.WriteByte(c)
-
-				i += 2
-
-				continue
-			}
-		}
-
-		b.WriteByte(path[i])
-	}
-
-	return b.String()
-}
-
-func isUnreserved(c byte) bool {
-	return 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || strings.IndexByte("-._~", c) >= 0
 }

@@ -41,25 +41,6 @@ func TestClientAddr(t *testing.T) {
 	}
 }
 
-// Checks the decoded characters, those just outside their ranges, and escapes cut short or not hex.
-func TestUnreserved(t *testing.T) {
-	for in, want := range map[string]string{
-		"/a/b":                      "/a/b",
-		"%7E/%7e":                   "~/~",
-		"/%41%5A%61%7A%30%39":       "/AZaz09",
-		"/%4a%5f":                   "/J_",
-		"/%2D%2E%5F":                "/-._",
-		"/%40%5B%60%7B%2F%3A%20%E2": "/%40%5B%60%7B%2F%3A%20%E2",
-		"/%":                        "/%",
-		"/%4":                       "/%4",
-		"/%4G%G4%Z1":                "/%4G%G4%Z1",
-	} {
-		if got := unreserved(in); got != want {
-			t.Errorf("unreserved(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // VHost drops a default or empty port, a name's final dot, the brackets of an IPv6 address left without a port, and the
 // leading zeros of a valid port.
 func TestVHost(t *testing.T) {
