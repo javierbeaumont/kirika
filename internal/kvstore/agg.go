@@ -157,7 +157,7 @@ func (db *DB) NewBatch(o Options) *Batch {
 	}
 
 	for _, name := range o.IndexPages {
-		b.index = append(b.index, "/"+name)
+		b.index = append(b.index, canonicalURI("/"+name))
 	}
 
 	for _, code := range o.ValidCodes {
@@ -169,14 +169,14 @@ func (db *DB) NewBatch(o Options) *Batch {
 
 // Apply counts one event in its class: in its hour, its day and each dimension of hostKey(event.Host). It adds a hit, a
 // page if the path is one, and its size as bandwidth. A 206 that does not start at byte 0 adds its size but no hit, and
-// nothing when it has no body. A path and a referrer count without their fragment and query, and an index page under
-// its directory. A page also adds clientKey(event.ClientIP) to its month's unique visitors, and a correct one to the
-// client's visits. A missing status or referrer adds no value to its dimension, and a missing client no visitor or
-// visit. The client kind is uaclass.Bot when the path asks for robots.txt, else Unknown when the log carries no
-// User-Agent.
+// nothing when it has no body. A path and a referrer count without their fragment and query, in the spelling
+// canonicalURI gives, and an index page under its directory. A page also adds clientKey(event.ClientIP) to its month's
+// unique visitors, and a correct one to the client's visits. A missing status or referrer adds no value to its
+// dimension, and a missing client no visitor or visit. The client kind is uaclass.Bot when the path asks for
+// robots.txt, else Unknown when the log carries no User-Agent.
 func (b *Batch) Apply(event logparse.Event) {
 	host := hostKey(event.Host)
-	path := cutAt(event.Path, b.cut)
+	path := canonicalURI(cutAt(event.Path, b.cut))
 
 	clientKind := uaclass.Unknown
 	if event.HasUserAgent {
@@ -215,7 +215,7 @@ func (b *Batch) Apply(event logparse.Event) {
 		b.add(dimKey(tagStat, host, month, strconv.Itoa(event.Status)), trafficClass, counts)
 	}
 
-	if referrer := cutAt(event.Referer, b.cut); referrer != "" {
+	if referrer := canonicalURI(cutAt(event.Referer, b.cut)); referrer != "" {
 		b.add(dimKey(tagRef, host, month, clip(referrer)), trafficClass, counts)
 	}
 
@@ -294,20 +294,29 @@ func clientKey(client string) string {
 	return strings.ToLower(client)
 }
 
-// Cuts s to at most maxValueLen bytes without splitting a character: a cut inside one moves back to its start, at most
-// utf8.UTFMax-1 bytes. With no start there, s is not UTF-8 and is cut at maxValueLen.
+// Cuts s to at most maxValueLen bytes without splitting a character or an escape: a cut inside a character moves back
+// to its start, at most utf8.UTFMax-1 bytes, and then one inside an escape to its "%". With no start there, s is not
+// UTF-8 and only an escape moves the cut.
 func clip(s string) string {
 	if len(s) <= maxValueLen {
 		return s
 	}
 
+	cut := maxValueLen
+
 	for n := maxValueLen; n > maxValueLen-utf8.UTFMax; n-- {
 		if utf8.RuneStart(s[n]) {
-			return s[:n]
+			cut = n
+
+			break
 		}
 	}
 
-	return s[:maxValueLen]
+	if percent := strings.LastIndexByte(s[cut-2:cut], '%'); percent >= 0 {
+		cut -= 2 - percent
+	}
+
+	return s[:cut]
 }
 
 // Flush writes the batch in one transaction and empties it: its counters and sessions add to the stored ones, its

@@ -21,6 +21,7 @@ package kvstore
 
 import (
 	"maps"
+	"net/url"
 	"strings"
 	"unicode"
 )
@@ -86,21 +87,27 @@ func cutAt(value, chars string) string {
 	return value
 }
 
-// Returns the extension of a path in lowercase: the word characters of any script after its last dot. Anything else
-// there, such as a byte that is not UTF-8, means the path has none.
+// Returns the extension of a path in lowercase: the word characters of any script after its last dot, once that text's
+// escapes are decoded. Anything else there, such as a byte that is not UTF-8 or a malformed escape, means the path has
+// none.
 func extension(path string) string {
 	dot := strings.LastIndexByte(path, '.')
 	if dot < 0 {
 		return ""
 	}
 
-	for _, char := range path[dot+1:] {
+	ext, err := url.PathUnescape(path[dot+1:])
+	if err != nil {
+		return ""
+	}
+
+	for _, char := range ext {
 		if !wordRune(char) {
 			return ""
 		}
 	}
 
-	return strings.ToLower(path[dot+1:])
+	return strings.ToLower(ext)
 }
 
 // Reports whether char is a word character, as Perl's \w defines it for Unicode.

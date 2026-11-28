@@ -150,6 +150,7 @@ func TestClasses(t *testing.T) {
 		group int
 	}{
 		{"200", page("h", "/", 200, 1, base), false, groupCorrect},
+		{"robots.txt escaped", page("h", "/robots%2Etxt", 200, 1, base), true, groupCorrect},
 		{"206", page("h", "/", 206, 1, base), false, groupCorrect},
 		{"304", page("h", "/", 304, 1, base), false, groupCorrect},
 		{"100", page("h", "/", 100, 1, base), false, groupOther},
@@ -364,7 +365,8 @@ func TestValidCodes(t *testing.T) {
 	}
 }
 
-// An index page counts under its directory, with the default index pages or others, and a file never does.
+// An index page counts under its directory, with the default index pages or others, in any script, and a file never
+// does.
 func TestIndexPages(t *testing.T) {
 	ym := base.Format("200601")
 	b := applied(
@@ -393,6 +395,52 @@ func TestIndexPages(t *testing.T) {
 	}
 	if got := counted(b, encKey(tagURL, "o", ym), Filter{}); !reflect.DeepEqual(got, want) {
 		t.Errorf("paths with default.htm and index.png = %+v, want %+v", got, want)
+	}
+
+	b = batchIn(time.UTC, Options{
+		IndexPages: []string{"\u00edndice.html"}, ValidCodes: []int{200}, VisitTimeout: DefaultVisitTimeout,
+	})
+	for _, path := range []string{"/docs/\u00edndice.html", "/docs/%c3%adndice.html"} {
+		b.Apply(page("p", path, 200, 1, base))
+	}
+
+	if got := counted(b, encKey(tagURL, "p", ym), Filter{}); !reflect.DeepEqual(got, map[string]Counts{
+		"/docs/": pageCounts(2, 2),
+	}) {
+		t.Errorf("paths with an index page in another script = %+v, want /docs/ twice", got)
+	}
+}
+
+// A path and a referrer count once whichever way the log escapes them. A file escaped is still a file.
+func TestOneSpelling(t *testing.T) {
+	var evs []logparse.Event
+
+	for _, spelling := range []string{"a%C3%B1o", "a%c3%b1o", "a\u00f1o"} {
+		ev := page("h", "/"+spelling, 200, 1, base)
+		ev.Referer = "https://r.example/" + spelling
+		evs = append(evs, ev)
+	}
+
+	b := applied(evs...)
+	month := base.Format("200601")
+
+	if got := counted(b, encKey(tagURL, "h", month), Filter{}); !reflect.DeepEqual(got, map[string]Counts{
+		"/a%C3%B1o": pageCounts(3, 3),
+	}) {
+		t.Errorf("paths = %+v, want /a%%C3%%B1o thrice", got)
+	}
+
+	if got := counted(b, encKey(tagRef, "h", month), Filter{}); !reflect.DeepEqual(got, map[string]Counts{
+		"https://r.example/a%C3%B1o": pageCounts(3, 3),
+	}) {
+		t.Errorf("referrers = %+v, want https://r.example/a%%C3%%B1o thrice", got)
+	}
+
+	b = applied(page("h", "/logo%2epng", 200, 1, base))
+	if got := counted(b, encKey(tagURL, "h", month), Filter{}); !reflect.DeepEqual(got, map[string]Counts{
+		"/logo.png": {HitBandwidth: 1, Hits: 1},
+	}) {
+		t.Errorf("paths = %+v, want the file /logo.png", got)
 	}
 }
 
@@ -449,8 +497,8 @@ func TestFragment(t *testing.T) {
 	}
 }
 
-// A query starts only at "?" by default, and also at an added separator. A path loses its query before it is checked
-// for a page, an index page or robots.txt.
+// A query starts only at "?" by default, and also at an added separator, as the log wrote it. A path loses its query
+// before it is checked for a page, an index page or robots.txt.
 func TestQuerySeparators(t *testing.T) {
 	ym := base.Format("200601")
 	ev := page("h", "/app;s=1", 200, 1, base)
@@ -499,6 +547,21 @@ func TestQuerySeparators(t *testing.T) {
 	want = map[string]Counts{"https://r.example/p": {HitBandwidth: 4, Hits: 4, PageBandwidth: 2, Pages: 2}}
 	if got := counted(b, encKey(tagRef, "o", ym), all); !reflect.DeepEqual(got, want) {
 		t.Errorf("referrers with ; = %+v, want %+v", got, want)
+	}
+
+	b = batchIn(time.UTC, Options{QuerySeparators: "|", ValidCodes: []int{200}, VisitTimeout: DefaultVisitTimeout})
+	ev = page("p", "/a|b", 200, 1, base)
+	ev.Referer = "https://r.example/p|s=1"
+	b.Apply(ev)
+
+	want = map[string]Counts{"/a": pageCounts(1, 1)}
+	if got := counted(b, encKey(tagURL, "p", ym), all); !reflect.DeepEqual(got, want) {
+		t.Errorf("paths with | = %+v, want /a: a query is cut before its spelling changes", got)
+	}
+
+	want = map[string]Counts{"https://r.example/p": pageCounts(1, 1)}
+	if got := counted(b, encKey(tagRef, "p", ym), all); !reflect.DeepEqual(got, want) {
+		t.Errorf("referrers with | = %+v, want https://r.example/p", got)
 	}
 }
 
@@ -552,6 +615,10 @@ func TestClip(t *testing.T) {
 		{"2-byte characters", "/" + strings.Repeat("\u00f1", maxValueLen), maxValueLen - 1},
 		{"4-byte characters", "/" + strings.Repeat("\U0001F600", maxValueLen), maxValueLen - 3},
 		{"bytes that are not UTF-8", strings.Repeat("/\x80\x80\x80\x80", maxValueLen), maxValueLen},
+		// After "/", "/x" and "/xy", an escape starts at byte maxValueLen, 2 bytes before it and 1 byte before it.
+		{"an escape after the cut", "/" + strings.Repeat("%C3%A9", maxValueLen), maxValueLen},
+		{"a cut in an escape", "/x" + strings.Repeat("%C3%A9", maxValueLen), maxValueLen - 2},
+		{"a cut after a percent sign", "/xy" + strings.Repeat("%C3%A9", maxValueLen), maxValueLen - 1},
 	} {
 		if got := clip(tc.s); got != tc.s[:tc.want] {
 			t.Errorf("clip of %s is %d bytes, want %d", tc.name, len(got), tc.want)
