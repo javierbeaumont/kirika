@@ -47,7 +47,7 @@ func (b *Batch) SetState(path string, s LogState) {
 // State returns the stored state of the log at path; ok is false when it has none. An unreadable state is an error,
 // since reading the log again would count it twice.
 func (db *DB) State(path string) (s LogState, ok bool, err error) {
-	err = db.b.View(func(tx *bolt.Tx) error {
+	err = db.file.View(func(tx *bolt.Tx) error {
 		v := tx.Bucket(bktState).Get([]byte(path))
 		if v == nil {
 			return nil

@@ -148,7 +148,7 @@ func (db *DB) NewBatch(o Options) *Batch {
 		clientPages: map[int]int{},
 		cut:         "#?" + o.QuerySeparators,
 		d:           map[string]tally{},
-		loc:         db.loc,
+		loc:         db.location,
 		notPage:     notPageSet(o.NotPages, o.Pages),
 		state:       map[string]LogState{},
 		timeout:     o.VisitTimeout,
@@ -329,7 +329,7 @@ func (db *DB) Flush(b *Batch) (closedYearPages int, err error) {
 		return 0, nil
 	}
 
-	err = db.b.Update(func(tx *bolt.Tx) error {
+	err = db.file.Update(func(tx *bolt.Tx) error {
 		// The visits go to a copy, so a failed flush leaves the batch as it was.
 		d := make(map[string]tally, len(b.d))
 		for k, t := range b.d {
@@ -430,7 +430,7 @@ func months(date string) []string {
 // Calls yield with the rest and the counters of each agg key that starts with one of prefixes and counts something
 // under filter, all in one read transaction. The rest is valid only inside yield.
 func (db *DB) scan(filter Filter, yield func(rest []byte, counts Counts), prefixes ...[]byte) error {
-	return db.b.View(func(tx *bolt.Tx) error {
+	return db.file.View(func(tx *bolt.Tx) error {
 		cur := tx.Bucket(bktAgg).Cursor()
 
 		for _, prefix := range prefixes {
@@ -523,7 +523,7 @@ func checked(period string, f Filter) (string, error) {
 func (db *DB) Hosts() ([]Host, error) {
 	var out []Host
 
-	err := db.b.View(func(tx *bolt.Tx) error {
+	err := db.file.View(func(tx *bolt.Tx) error {
 		day := encKey(tagDay)
 		cur := tx.Bucket(bktAgg).Cursor()
 

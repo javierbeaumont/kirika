@@ -153,7 +153,7 @@ func TestSketchSparse(t *testing.T) {
 
 	key := uniqKey("h", base.Format("200601"), newClass(false, groupCorrect))
 
-	err := db.b.View(func(tx *bolt.Tx) error {
+	err := db.file.View(func(tx *bolt.Tx) error {
 		if n := len(tx.Bucket(bktUniq).Get(key)); n == 0 || n > 100 {
 			t.Errorf("the sketch of ten clients takes %d bytes, want 1 to 100", n)
 		}
@@ -171,7 +171,7 @@ func storedYearKey(t *testing.T, db *DB, year string) []byte {
 
 	var key []byte
 
-	err := db.b.View(func(tx *bolt.Tx) error {
+	err := db.file.View(func(tx *bolt.Tx) error {
 		key = bytes.Clone(tx.Bucket(bktKeys).Get([]byte(year)))
 
 		return nil
@@ -217,7 +217,7 @@ func TestSketchKeyed(t *testing.T) {
 			probe.Insert(tc.hash(ip(i)))
 		}
 
-		err := db.b.View(func(tx *bolt.Tx) error {
+		err := db.file.View(func(tx *bolt.Tx) error {
 			stored, ok := loadSketch(tx.Bucket(bktUniq).Get(uniqKey("h", tc.month.Format("200601"), humanVisits)))
 			if !ok {
 				return errors.New("no stored sketch")

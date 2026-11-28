@@ -44,7 +44,7 @@ func sessionCount(t *testing.T, db *DB) int {
 
 	var n int
 
-	err := db.b.View(func(tx *bolt.Tx) error {
+	err := db.file.View(func(tx *bolt.Tx) error {
 		n = tx.Bucket(bktSess).Stats().KeyN
 
 		return nil

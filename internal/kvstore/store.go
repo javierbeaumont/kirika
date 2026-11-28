@@ -54,23 +54,24 @@ var (
 	errNotStore      = errors.New("kvstore: not a kirika store: it holds buckets but no schema version")
 	errSchemaCorrupt = errors.New("kvstore: corrupt schema version")
 	errSchemaNewer   = errors.New("kvstore: store schema is newer than this build")
-	errZone          = errors.New("kvstore: the store keeps another time zone")
 )
 
 // DB is an open store. bbolt locks the file, so one process at a time holds it.
 type DB struct {
-	b    *bolt.DB
-	loc  *time.Location // the zone of its hours, days and months
-	salt []byte         // the key of its session IDs
+	file         *bolt.DB
+	location     *time.Location // the zone of its hours, days and months
+	replacedZone string         // the zone Open replaced, else ""
+	salt         []byte         // the key of its session IDs
 }
 
 // Open opens the store at path, creating it if missing. timeout bounds each wait for another process to release the
 // file, one to read it and one to write it (0 waits forever). zone names the time zone of its hours, days and months,
-// such as America/New_York. When empty, it is the zone the store keeps or, for a new store, the system's, else UTC. A
-// zone of the tz database's posix/ or right/ copies counts without that prefix. A file with buckets but no schema
-// version, such as another program's, is refused before anything is written, and so is a store written by a newer build
-// or with a corrupt schema version. A corrupt salt is refused too, and so is a zone other than the stored one, one the
-// system does not know, or one that is each run's: Local, and localtime, which Debian links to /etc/localtime.
+// such as America/New_York; one other than the store's replaces it, and what the store counted stays in the zone it was
+// counted in. When empty, it is the zone the store keeps or, for a new store, the system's, else UTC. A zone of the tz
+// database's posix/ or right/ copies counts without that prefix. A file with buckets but no schema version, such as
+// another program's, is refused before anything is written, and so is a store written by a newer build or with a
+// corrupt schema version. A corrupt salt is refused too, and so is a zone the system does not know or one that is each
+// run's: Local, and localtime, which Debian links to /etc/localtime.
 func Open(path string, timeout time.Duration, zone string) (*DB, error) {
 	if err := probe(path, timeout); err != nil {
 		return nil, err
@@ -81,7 +82,7 @@ func Open(path string, timeout time.Duration, zone string) (*DB, error) {
 		return nil, err
 	}
 
-	db := &DB{b: file}
+	db := &DB{file: file}
 	if err := db.init(zone); err != nil {
 		_ = file.Close()
 
@@ -123,18 +124,23 @@ func openFile(path string, options *bolt.Options) (*bolt.DB, error) {
 
 // Location returns the store's time zone.
 func (db *DB) Location() *time.Location {
-	return db.loc
+	return db.location
+}
+
+// ReplacedZone returns the name of the time zone Open replaced, else "".
+func (db *DB) ReplacedZone() string {
+	return db.replacedZone
 }
 
 // Close releases the store and its lock.
 func (db *DB) Close() error {
-	return db.b.Close()
+	return db.file.Close()
 }
 
-// Checks the schema version, then creates the missing buckets and writes the schema version, the time zone and the
-// salt, or checks the stored ones.
+// Checks the schema version, then creates the missing buckets and writes the schema version and the salt, or checks the
+// stored ones. Writes the time zone when it is new or replaced.
 func (db *DB) init(zone string) error {
-	return db.b.Update(func(tx *bolt.Tx) error {
+	return db.file.Update(func(tx *bolt.Tx) error {
 		if err := checkSchema(tx); err != nil {
 			return err
 		}
@@ -160,25 +166,25 @@ func (db *DB) init(zone string) error {
 			zone = plainZone(systemZone(os.LookupEnv, os.Readlink, readText))
 		case zone == "":
 			zone = stored
-		case stored != "" && zone != stored:
-			return fmt.Errorf("%w: %s, not %s", errZone, stored, zone)
 		}
 
 		if zone == "Local" || zone == "localtime" {
 			return errLocalZone
 		}
 
-		loc, err := time.LoadLocation(zone)
+		location, err := time.LoadLocation(zone)
 		if err != nil {
 			return fmt.Errorf("kvstore: %w", err)
 		}
 
-		db.loc = loc
+		db.location = location
 
-		if stored == "" {
+		if zone != stored {
 			if err := meta.Put(metaZone, []byte(zone)); err != nil {
 				return err
 			}
+
+			db.replacedZone = stored
 		}
 
 		return db.loadSalt(meta)

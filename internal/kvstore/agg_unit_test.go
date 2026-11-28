@@ -39,7 +39,7 @@ import (
 
 // Returns an empty batch, with no store, that counts by the rules of o in loc.
 func batchIn(loc *time.Location, o Options) *Batch {
-	return (&DB{loc: loc}).NewBatch(o)
+	return (&DB{location: loc}).NewBatch(o)
 }
 
 // Returns a batch in UTC with the default options and evs applied.

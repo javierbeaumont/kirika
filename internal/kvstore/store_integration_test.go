@@ -121,7 +121,7 @@ func TestOpen(t *testing.T) {
 
 	defer closeStore(t, db)
 
-	err = db.b.View(func(tx *bolt.Tx) error {
+	err = db.file.View(func(tx *bolt.Tx) error {
 		for _, name := range [][]byte{bktAgg, bktKeys, bktSess, bktState, bktUniq} {
 			if tx.Bucket(name) == nil {
 				t.Errorf("no %s bucket", name)
@@ -286,7 +286,7 @@ func TestInitRefuses(t *testing.T) {
 			t.Fatalf("bolt open: %v", err)
 		}
 
-		if err := (&DB{b: file}).init("UTC"); !errors.Is(err, want) {
+		if err := (&DB{file: file}).init("UTC"); !errors.Is(err, want) {
 			t.Errorf("init(%s): err = %v, want %v", filepath.Base(path), err, want)
 		}
 
@@ -316,7 +316,7 @@ func TestOpenEmptyFile(t *testing.T) {
 			continue
 		}
 
-		err = db.b.View(func(tx *bolt.Tx) error {
+		err = db.file.View(func(tx *bolt.Tx) error {
 			if version := tx.Bucket(bktMeta).Get(metaSchema); !bytes.Equal(version, []byte{schemaVersion}) {
 				t.Errorf("Open(%s): schema = %x, want %x", filepath.Base(path), version, schemaVersion)
 			}
@@ -448,22 +448,23 @@ func TestSaltOutlivesMapping(t *testing.T) {
 	}
 }
 
-// Opens the store at path with zone and returns the name of the zone it counts in.
-func openZone(t *testing.T, path, zone string) (string, error) {
+// Opens the store at path with zone and returns the names of the zone it counts in and of the one it replaced.
+func openZone(t *testing.T, path, zone string) (location, replaced string, err error) {
 	t.Helper()
 
 	db, err := Open(path, time.Second, zone)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	defer closeStore(t, db)
 
-	return db.Location().String(), nil
+	return db.Location().String(), db.ReplacedZone(), nil
 }
 
-// A new store keeps the configured zone, else the system's. Reopened, it keeps that zone and refuses another. Local,
-// localtime or a zone the system does not know is refused, whether configured, stored or the system's, and never kept.
+// A new store keeps the configured zone, else the system's. Reopened, it keeps that zone until another is configured,
+// which replaces it. Local, localtime or a zone the system does not know is refused, whether configured, stored or the
+// system's, and never kept; a configured zone replaces such a stored one.
 func TestOpenZone(t *testing.T) {
 	refused := []string{"Local", "localtime", "Nowhere/Nothing"}
 	// Reports whether err refuses zone as it should: as each run's zone, unless the system does not know it.
@@ -474,7 +475,7 @@ func TestOpenZone(t *testing.T) {
 	for _, zone := range refused {
 		t.Setenv("TZ", zone)
 
-		if _, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), ""); !refuses(zone, err) {
+		if _, _, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), ""); !refuses(zone, err) {
 			t.Errorf("system zone %s: err = %v", zone, err)
 		}
 	}
@@ -483,36 +484,45 @@ func TestOpenZone(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "kirika.db")
 	for _, zone := range refused {
-		if _, err := openZone(t, path, zone); !refuses(zone, err) {
+		if _, _, err := openZone(t, path, zone); !refuses(zone, err) {
 			t.Errorf("configured zone %s: err = %v", zone, err)
 		}
 	}
 
-	if got, err := openZone(t, path, ""); got != "America/Sao_Paulo" {
+	if got, _, err := openZone(t, path, ""); got != "America/Sao_Paulo" {
 		t.Errorf("new store, no zone: %q, %v; want the system's America/Sao_Paulo", got, err)
 	}
 
 	t.Setenv("TZ", "Africa/Nairobi")
 
-	for _, zone := range []string{"", "America/Sao_Paulo"} {
-		if got, err := openZone(t, path, zone); got != "America/Sao_Paulo" {
-			t.Errorf("reopened with %q: %q, %v; want the stored America/Sao_Paulo", zone, got, err)
+	// Each reopening: the zone configured, the zone the store counts in and the one it replaced.
+	for _, reopen := range []struct{ zone, want, replaced string }{
+		{"", "America/Sao_Paulo", ""},
+		{"America/Sao_Paulo", "America/Sao_Paulo", ""},
+		{"Asia/Tokyo", "Asia/Tokyo", "America/Sao_Paulo"},
+		{"", "Asia/Tokyo", ""},
+	} {
+		got, replaced, err := openZone(t, path, reopen.zone)
+		if got != reopen.want || replaced != reopen.replaced {
+			t.Errorf("reopened with %q: %q, replacing %q, %v; want %s, replacing %q",
+				reopen.zone, got, replaced, err, reopen.want, reopen.replaced)
 		}
 	}
 
-	if _, err := openZone(t, path, "Africa/Nairobi"); !errors.Is(err, errZone) {
-		t.Errorf("reopened with another zone: err = %v, want errZone", err)
-	}
-
-	if got, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), "UTC"); got != "UTC" {
+	if got, _, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), "UTC"); got != "UTC" {
 		t.Errorf("new store in UTC: %q, %v; want UTC over the system's", got, err)
 	}
 
 	for _, zone := range refused {
 		setMeta(t, path, metaZone, []byte(zone))
 
-		if _, err := openZone(t, path, ""); !refuses(zone, err) {
+		if _, _, err := openZone(t, path, ""); !refuses(zone, err) {
 			t.Errorf("stored zone %s: err = %v", zone, err)
+		}
+
+		if got, replaced, err := openZone(t, path, "UTC"); got != "UTC" || replaced != zone {
+			t.Errorf("stored zone %s, opened with UTC: %q, replacing %q, %v; want UTC, replacing %s",
+				zone, got, replaced, err, zone)
 		}
 	}
 }
@@ -527,7 +537,7 @@ func TestOpenSystemZone(t *testing.T) {
 
 	t.Setenv("TZ", link)
 
-	if got, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), ""); got != "Pacific/Auckland" {
+	if got, _, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), ""); got != "Pacific/Auckland" {
 		t.Errorf("TZ links to Pacific/Auckland: %q, %v; want Pacific/Auckland", got, err)
 	}
 }
@@ -538,17 +548,17 @@ func TestOpenPlainZone(t *testing.T) {
 	t.Setenv("TZ", "/usr/share/zoneinfo/right/Africa/Nairobi")
 
 	path := filepath.Join(t.TempDir(), "kirika.db")
-	if got, err := openZone(t, path, ""); got != "Africa/Nairobi" {
+	if got, _, err := openZone(t, path, ""); got != "Africa/Nairobi" {
 		t.Errorf("system zone right/Africa/Nairobi: %q, %v; want Africa/Nairobi", got, err)
 	}
 
 	for _, zone := range []string{"posix/Africa/Nairobi", "right/Africa/Nairobi"} {
-		if got, err := openZone(t, path, zone); got != "Africa/Nairobi" {
+		if got, _, err := openZone(t, path, zone); got != "Africa/Nairobi" {
 			t.Errorf("reopened with %s: %q, %v; want Africa/Nairobi", zone, got, err)
 		}
 	}
 
-	got, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), "posix/America/Sao_Paulo")
+	got, _, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), "posix/America/Sao_Paulo")
 	if got != "America/Sao_Paulo" {
 		t.Errorf("new store in posix/America/Sao_Paulo: %q, %v; want America/Sao_Paulo", got, err)
 	}
@@ -557,19 +567,20 @@ func TestOpenPlainZone(t *testing.T) {
 	setMeta(t, stored, metaZone, []byte("right/Africa/Nairobi"))
 
 	for _, zone := range []string{"", "Africa/Nairobi", "right/Africa/Nairobi"} {
-		if got, err := openZone(t, stored, zone); got != "Africa/Nairobi" {
-			t.Errorf("stored right/Africa/Nairobi, opened with %q: %q, %v; want Africa/Nairobi", zone, got, err)
+		if got, replaced, err := openZone(t, stored, zone); got != "Africa/Nairobi" || replaced != "" {
+			t.Errorf("stored right/Africa/Nairobi, opened with %q: %q, replacing %q, %v; "+
+				"want Africa/Nairobi, replacing none", zone, got, replaced, err)
 		}
 	}
 
 	for _, zone := range []string{"posix/", "right/"} {
-		if _, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), zone); err == nil {
+		if _, _, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), zone); err == nil {
 			t.Errorf("new store in %s: no error", zone)
 		}
 
 		t.Setenv("TZ", "/usr/share/zoneinfo/"+zone)
 
-		if _, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), ""); err == nil {
+		if _, _, err := openZone(t, filepath.Join(t.TempDir(), "kirika.db"), ""); err == nil {
 			t.Errorf("system zone %s: no error", zone)
 		}
 	}

@@ -99,7 +99,7 @@ func series(t *testing.T, db *DB, host, tag, period string, f Filter) []TimePoin
 func putRaw(t *testing.T, db *DB, bkt, key, v []byte) {
 	t.Helper()
 
-	err := db.b.Update(func(tx *bolt.Tx) error { return tx.Bucket(bkt).Put(key, v) })
+	err := db.file.Update(func(tx *bolt.Tx) error { return tx.Bucket(bkt).Put(key, v) })
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -297,10 +297,10 @@ func TestDimPeriods(t *testing.T) {
 // A year's Dim reads its months in one read transaction.
 func TestDimOneTransaction(t *testing.T) {
 	db := openStore(t)
-	before := db.b.Stats().TxN
+	before := db.file.Stats().TxN
 	dim(t, db, "h", tagURL, "2000", Filter{})
 
-	if got := db.b.Stats().TxN - before; got != 1 {
+	if got := db.file.Stats().TxN - before; got != 1 {
 		t.Errorf("a year's Dim started %d read transactions, want 1", got)
 	}
 }

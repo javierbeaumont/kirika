@@ -224,7 +224,7 @@ func (db *DB) Unique(period string, f Filter, hosts ...string) (uint64, error) {
 
 	acc := newSketch()
 
-	err = db.b.View(func(tx *bolt.Tx) error {
+	err = db.file.View(func(tx *bolt.Tx) error {
 		bkt := tx.Bucket(bktUniq)
 
 		for _, host := range hosts {
