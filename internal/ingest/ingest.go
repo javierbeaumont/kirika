@@ -76,9 +76,9 @@ func DefaultMethods() []string {
 
 // Result counts the lines of a read by what became of them.
 type Result struct {
-	Counted         int // in the store
+	Counted         int // flushed to the store
 	ClosedYearPages int // the counted pages with a client of a year closed before their flush: no unique visitor
-	Blank           int // empty or spaces only
+	Blank           int // empty or whitespace only
 	NotAccess       int // a message that is not an access, which Caddy writes in its log too
 	Dropped         int // a method out of Options.Methods
 	Malformed       int // unreadable: the parser refused it
@@ -104,8 +104,8 @@ type Reader struct {
 	now     func() time.Time
 	parse   logparse.Parser
 	path    string            // absolute, the key of the log's state
-	rotated []string          // absolute globs
 	place   *kvstore.LogState // the reader's place in its log, in memory only, taken while the path has no state
+	rotated []string          // absolute globs
 	warned  bool              // that the log has no access line yet
 }
 
@@ -211,15 +211,16 @@ func (o Options) check(parse logparse.Parser) error {
 // the new one from its start, and keeps the new one; one with no whole line yet gets the state of no line read. When
 // the reader keeps no file, as a new one, and the path's file does not hold the state's line, it first reads the rest
 // of the rotated file that does, then each newer one, oldest first, as Options.Rotated finds them. A state of no line
-// read may name the last line of the log before. It warns if no rotated file holds a line of the log read last. When
-// the path names no file and the one kept open has no name left, it reads what that one gained and releases it. A last
-// line with no newline yet waits for the next read. A read with no new line writes nothing, unless it moves to a new
-// log or releases a deleted one; either records the state of no line read. A first read, one of a path with no state
-// yet, writes nothing unless it finds a readable line, counted or dropped, and fails with ErrUnreadable if it finds an
-// unreadable one instead. If it finds only lines of neither kind, it warns once per reader and keeps its place in
-// memory: the reader's next read goes on after them, and a new reader starts the log over. Any other read skips
-// unreadable lines. Once ctx ends, a read fails with ctx's error before its next line. A failed read keeps what it
-// flushed and the file of its last flush, else the old one; its Result counts the lines it read before the error.
+// read may name the last line of the log before. It warns if no rotated file holds a line of the log read last. On
+// Unix, when the path names no file and the one kept open has no name left, it reads what that one gained and releases
+// it. A last line with no newline yet waits for the next read. A read that finds no line writes nothing, unless it
+// changes the path's state: a move to a new log and the release of a deleted one record the state of no line read. A
+// first read, one of a path with no state yet, writes nothing unless it finds a readable line, counted or dropped, and
+// fails with ErrUnreadable if it finds an unreadable one instead. If it finds only lines of neither kind, it warns once
+// per reader and keeps its place in memory: the reader's next read goes on after them, and a new reader starts the log
+// over. Any other read skips unreadable lines. Once ctx ends, a read fails with ctx's error before its next line. A
+// failed read keeps what it flushed and the file of its last flush, else the old one; its Result counts the lines it
+// flushed.
 func (r *Reader) Read(ctx context.Context) (Result, error) {
 	var progress scan
 
@@ -266,6 +267,7 @@ func (r *Reader) Read(ctx context.Context) (Result, error) {
 
 			r.warned = true
 		}
+	case progress.result == (Result{}) && progress.last == place: // no line, and the state as it is
 	case progress.pending > 0 || progress.moved:
 		err = r.flush(&progress)
 	}
@@ -273,6 +275,8 @@ func (r *Reader) Read(ctx context.Context) (Result, error) {
 	// The logs are open read only, so a failed close loses nothing.
 	switch {
 	case err != nil:
+		progress.result = progress.flushed
+
 		if file != r.file {
 			_ = file.Close()
 		}
@@ -331,6 +335,7 @@ func (r *Reader) open() (*os.File, error) {
 type scan struct {
 	batch    *kvstore.Batch
 	file     *os.File         // last's file, nil for a rotated file's
+	flushed  Result           // result at the last flush
 	last     kvstore.LogState // the last line read, or none in a log moved to
 	moved    bool             // the read moved to a new log, or released a deleted one
 	pending  int              // the lines read since the last flush
@@ -351,6 +356,7 @@ func (r *Reader) flush(progress *scan) error {
 
 	progress.pending = 0
 	progress.result.ClosedYearPages += closedYearPages
+	progress.flushed = progress.result
 
 	if progress.file != r.file {
 		_ = r.release() // read only: a failed close loses nothing
@@ -525,7 +531,7 @@ func (r *Reader) tell(ctx context.Context, rotated string, logLine line, lineNum
 }
 
 // Places a reader of file after the line place names, when placed and place names a line that is still there; else at
-// the start of file, which holds a new log. It also returns the reader's offset and the number of the line before it.
+// the start of file. It also returns the reader's offset and the number of the line before it.
 func resume(file *os.File, place kvstore.LogState, placed bool) (
 	lines *bufio.Reader, offset, lineNum int64, err error,
 ) {
@@ -561,7 +567,7 @@ const (
 	blank
 	notAccess
 	dropped
-	malformed // the first unreadable one
+	malformed // the first unreadable fate
 	binary
 	tooLong
 	badDate

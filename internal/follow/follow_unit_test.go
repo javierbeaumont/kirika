@@ -36,30 +36,30 @@ import (
 
 // One read of a scripted log.
 type step struct {
-	res ingest.Result
-	err error
+	err    error
+	result ingest.Result
 }
 
 // A reader that gives its steps in turn and ends the run after the last one.
 type script struct {
 	cancel context.CancelFunc
-	steps  []step
 	reads  int
+	steps  []step
 }
 
 func (s *script) Read(context.Context) (ingest.Result, error) {
-	st := s.steps[s.reads]
+	current := s.steps[s.reads]
 
 	s.reads++
 	if s.reads == len(s.steps) {
 		s.cancel()
 	}
 
-	return st.res, st.err
+	return current.result, current.err
 }
 
-// Follows steps every interval, failing the test unless it reads each, and returns what it logged at debug level and
-// how many times it called onChange.
+// Follows steps every interval, failing the test unless it reads each, and returns what it logged, from debug level up,
+// and how many times it called onChange.
 func follow(t *testing.T, interval time.Duration, steps ...step) (logged string, changes int) {
 	t.Helper()
 
@@ -90,13 +90,13 @@ func TestDefaultInterval(t *testing.T) {
 // flushed.
 func TestRunChanges(t *testing.T) {
 	_, changes := follow(t, time.Nanosecond,
-		step{res: ingest.Result{Counted: 1}},
-		step{res: ingest.Result{Blank: 1, Dropped: 1}},
+		step{result: ingest.Result{Counted: 1}},
+		step{result: ingest.Result{Blank: 1, Dropped: 1}},
 		step{},
 		step{err: errors.New("gone")},
-		step{res: ingest.Result{Malformed: 50}, err: ingest.ErrUnreadable},
-		step{res: ingest.Result{Counted: 4}, err: errors.New("disk full")},
-		step{res: ingest.Result{Counted: 2}},
+		step{err: ingest.ErrUnreadable, result: ingest.Result{Malformed: 50}},
+		step{err: errors.New("disk full"), result: ingest.Result{Counted: 4}},
+		step{result: ingest.Result{Counted: 2}},
 	)
 
 	if changes != 3 {
@@ -104,12 +104,12 @@ func TestRunChanges(t *testing.T) {
 	}
 }
 
-// The first read comes at once, not after an interval.
+// The first read comes at once.
 func TestRunNow(t *testing.T) {
 	done := make(chan struct{})
 
 	go func() {
-		follow(t, time.Hour, step{res: ingest.Result{Counted: 1}})
+		follow(t, time.Hour, step{result: ingest.Result{Counted: 1}})
 		close(done)
 	}()
 
@@ -130,7 +130,7 @@ func TestRunEnded(t *testing.T) {
 	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()
 
-	Run(ctx, &script{cancel: cancel, steps: []step{{res: ingest.Result{Counted: 1}}}}, time.Nanosecond,
+	Run(ctx, &script{cancel: cancel, steps: []step{{result: ingest.Result{Counted: 1}}}}, time.Nanosecond,
 		slog.New(slog.DiscardHandler), nil)
 }
 
@@ -144,7 +144,7 @@ func (s stuck) Read(ctx context.Context) (ingest.Result, error) {
 	return ingest.Result{Counted: 1}, ctx.Err()
 }
 
-// The end of the context stops a read under way, and the run returns at once without a log or a call to onChange.
+// When the end of the context stops a read under way, the run returns at once, without a log or a call to onChange.
 func TestRunStopped(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	s, done := stuck{started: make(chan struct{})}, make(chan struct{})
@@ -171,18 +171,20 @@ func TestRunStopped(t *testing.T) {
 	}
 }
 
-// A failed read is logged once until its error changes or a read succeeds again, which is told; its counts are not.
+// A failed read is logged once until its error changes or a read succeeds again, which is told; its counts are logged
+// as any read's.
 func TestRunErrors(t *testing.T) {
 	gone, bad := errors.New("log gone"), errors.New("format bad")
 	logged, _ := follow(t, time.Nanosecond,
-		step{err: gone}, step{err: gone}, step{res: ingest.Result{Counted: 4, Malformed: 1}, err: bad}, step{}, step{},
-		step{err: gone})
+		step{err: gone}, step{err: gone}, step{err: bad, result: ingest.Result{Counted: 4, Malformed: 1}}, step{},
+		step{}, step{err: gone})
 
 	for text, want := range map[string]int{
 		`msg="read failed" error="log gone"`:   2,
 		`msg="read failed" error="format bad"`: 1,
 		`msg="read again"`:                     1,
-		"counted=":                             0,
+		`level=WARN msg="unreadable lines" counted=4 closed_year_pages=0 blank=0 not_access=0 dropped=0 malformed=1`: 1,
+		"counted=": 1,
 	} {
 		if got := strings.Count(logged, text); got != want {
 			t.Errorf("%d logs of %s, want %d:\n%s", got, text, want, logged)
@@ -191,17 +193,17 @@ func TestRunErrors(t *testing.T) {
 }
 
 // A read with an unreadable line or a page with a client of a closed year logs its counts as a warning, about the
-// unreadable lines when it has both; any other that took lines at debug level; and one that took none nothing.
+// unreadable lines when it has both; any other that took lines, at debug level; and one that took none, nothing.
 func TestRunReport(t *testing.T) {
 	logged, _ := follow(t, time.Nanosecond,
-		step{res: ingest.Result{Counted: 3, Malformed: 1}},
-		step{res: ingest.Result{Binary: 1}},
-		step{res: ingest.Result{TooLong: 1}},
-		step{res: ingest.Result{BadDate: 1}},
-		step{res: ingest.Result{Blank: 4, NotAccess: 5, Dropped: 6}},
-		step{res: ingest.Result{Counted: 2}},
-		step{res: ingest.Result{Counted: 2, ClosedYearPages: 1}},
-		step{res: ingest.Result{Counted: 1, ClosedYearPages: 1, Malformed: 1}},
+		step{result: ingest.Result{Counted: 3, Malformed: 1}},
+		step{result: ingest.Result{Binary: 1}},
+		step{result: ingest.Result{TooLong: 1}},
+		step{result: ingest.Result{BadDate: 1}},
+		step{result: ingest.Result{Blank: 4, NotAccess: 5, Dropped: 6}},
+		step{result: ingest.Result{Counted: 2}},
+		step{result: ingest.Result{Counted: 2, ClosedYearPages: 1}},
+		step{result: ingest.Result{Counted: 1, ClosedYearPages: 1, Malformed: 1}},
 		step{},
 	)
 
@@ -230,7 +232,7 @@ func TestRunNilLog(t *testing.T) {
 	defer cancel()
 
 	reader := &script{cancel: cancel, steps: []step{
-		{err: errors.New("gone")}, {res: ingest.Result{Malformed: 1}}, {res: ingest.Result{Counted: 1}},
+		{err: errors.New("gone")}, {result: ingest.Result{Malformed: 1}}, {result: ingest.Result{Counted: 1}},
 	}}
 	Run(ctx, reader, time.Nanosecond, nil, nil)
 

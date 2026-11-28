@@ -21,5 +21,5 @@ package ingest
 
 import "time"
 
-// The one date the tests write; every other instant is an offset from it.
+// The one date the tests name; every other instant is an offset from it or from the clock.
 var base = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)

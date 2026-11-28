@@ -52,7 +52,14 @@ func openStore(t *testing.T) *kvstore.DB {
 func openZone(t *testing.T, zone string) *kvstore.DB {
 	t.Helper()
 
-	db, err := kvstore.Open(filepath.Join(t.TempDir(), "kirika.db"), time.Second, zone)
+	return openAt(t, filepath.Join(t.TempDir(), "kirika.db"), zone)
+}
+
+// Returns the store at store in zone, closed when the test ends.
+func openAt(t *testing.T, store, zone string) *kvstore.DB {
+	t.Helper()
+
+	db, err := kvstore.Open(store, time.Second, zone)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -72,7 +79,7 @@ func ncsa(client, method, path string, tm time.Time) string {
 		tm.Format("02/Jan/2006:15:04:05 -0700"), method, path)
 }
 
-// Returns n lines of GET requests from distinct clients at base, each with its newline, the first from client first.
+// Returns n lines of GET requests at base, each with its newline, from distinct clients numbered from first.
 func gets(first, n int) string {
 	var b strings.Builder
 	for i := first; i < first+n; i++ {
@@ -191,7 +198,8 @@ func TestClosedYearPages(t *testing.T) {
 	}
 }
 
-// A chunk whose page closes a year makes that year's pages in the next chunks pages of a closed year.
+// A chunk whose page closes a year makes that year's pages in the next chunks pages of a closed year, which a read
+// stopped after their flush still counts.
 func TestClosedYearPagesChunks(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")
@@ -202,8 +210,10 @@ func TestClosedYearPagesChunks(t *testing.T) {
 	logReader := newReader(t, db, path, logparse.ParseNCSA, options)
 	logReader.chunk = 2
 
-	if got := read(t, logReader); got != (Result{Counted: 4, ClosedYearPages: 2}) {
-		t.Errorf("Read = %+v, want 4 counted, 2 pages of a closed year", got)
+	// The checks before the four lines.
+	got, err := logReader.Read(&countdown{Context: t.Context(), n: 4})
+	if got != (Result{Counted: 4, ClosedYearPages: 2}) || !errors.Is(err, context.Canceled) {
+		t.Errorf("stopped Read = %+v, %v; want 4 counted, 2 pages of a closed year, context.Canceled", got, err)
 	}
 }
 
@@ -331,9 +341,9 @@ func TestLongLastLine(t *testing.T) {
 	}
 }
 
-// Each line not counted adds to its own counter and is told once at debug level with its offset and reason, never with
-// its content; a counted one is not told. A line dated 24 hours ahead of the read counts, and one a second later does
-// not.
+// Each line not counted adds to its own counter and is told once at debug level with its number, offset and reason,
+// never with its client address; a counted one is not told. A line dated 24 hours ahead of the read counts, and one a
+// second later does not.
 func TestReasons(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")
@@ -437,7 +447,7 @@ func TestLineNumbers(t *testing.T) {
 }
 
 // The first read of a path fails and writes nothing when it finds an unreadable line and none counted or dropped, and
-// its error names the first unreadable line and why. Blank lines are neither: with only them, it warns.
+// its error names the first unreadable line and why. With only blank lines, it writes nothing either, and warns.
 func TestFirstRead(t *testing.T) {
 	const refused = "ingest: no readable line in the first read of a log; "
 
@@ -506,9 +516,9 @@ func TestFirstReadAgain(t *testing.T) {
 
 	for range 2 {
 		got, err := logReader.Read(t.Context())
-		if got != (Result{Malformed: 1}) || !errors.Is(err, ErrUnreadable) || !strings.Contains(fmt.Sprint(err),
+		if got != (Result{}) || !errors.Is(err, ErrUnreadable) || !strings.Contains(fmt.Sprint(err),
 			"line 3 is malformed") {
-			t.Errorf("Read of an unreadable line = %+v, %v; want 1 malformed and ErrUnreadable for line 3", got, err)
+			t.Errorf("Read of an unreadable line = %+v, %v; want nothing and ErrUnreadable for line 3", got, err)
 		}
 	}
 
@@ -544,9 +554,9 @@ func TestFirstReadPlace(t *testing.T) {
 	appendLog(t, path, "\n\n")
 
 	// The check before the first new line.
-	if got, err := logReader.Read(&countdown{Context: t.Context(), n: 1}); got != (Result{Blank: 1}) || !errors.Is(err,
+	if got, err := logReader.Read(&countdown{Context: t.Context(), n: 1}); got != (Result{}) || !errors.Is(err,
 		context.Canceled) {
-		t.Errorf("stopped Read = %+v, %v; want 1 blank, context.Canceled", got, err)
+		t.Errorf("stopped Read = %+v, %v; want nothing, context.Canceled", got, err)
 	}
 
 	if got := read(t, logReader); got != (Result{Blank: 2}) {
@@ -686,24 +696,18 @@ func (c *countdown) Err() error {
 	return nil
 }
 
-// A read whose context ends stops before its next line and writes nothing past its last flush, though its Result counts
-// the lines it read.
+// A read whose context ends stops before its next line, writes nothing past its last flush and counts no line it did
+// not flush.
 func TestReadStopped(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")
 	writeLog(t, path, gets(0, 3))
-	r := reader(t, db, path)
+	logReader := reader(t, db, path)
 
-	for _, tc := range []struct {
-		checks int
-		want   Result
-	}{
-		{0, Result{}},
-		{2, Result{Counted: 2}},
-	} {
-		res, err := r.Read(&countdown{Context: t.Context(), n: tc.checks})
-		if res != tc.want || !errors.Is(err, context.Canceled) {
-			t.Errorf("Read stopped after %d checks = %+v, %v; want %+v, context.Canceled", tc.checks, res, err, tc.want)
+	for _, checks := range []int{0, 2} {
+		result, err := logReader.Read(&countdown{Context: t.Context(), n: checks})
+		if result != (Result{}) || !errors.Is(err, context.Canceled) {
+			t.Errorf("Read stopped after %d checks = %+v, %v; want nothing, context.Canceled", checks, result, err)
 		}
 	}
 
@@ -711,13 +715,13 @@ func TestReadStopped(t *testing.T) {
 		t.Errorf("the stopped reads wrote: a state %v, %v, %d hits", ok, err, hits(t, db))
 	}
 
-	if got := read(t, r); got != (Result{Counted: 3}) {
+	if got := read(t, logReader); got != (Result{Counted: 3}) {
 		t.Errorf("next Read = %+v, want 3 counted", got)
 	}
 }
 
-// A read flushes every chunk lines, each flush with its state: one stopped keeps what it flushed, and the next goes on
-// after it.
+// A read flushes every chunk lines, each flush with its state: one stopped keeps what it flushed, counts only those
+// lines, and the next goes on after it.
 func TestChunks(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")
@@ -727,8 +731,8 @@ func TestChunks(t *testing.T) {
 
 	// The checks before the first three lines.
 	result, err := logReader.Read(&countdown{Context: t.Context(), n: 3})
-	if result != (Result{Counted: 3}) || !errors.Is(err, context.Canceled) || hits(t, db) != 2 {
-		t.Errorf("stopped Read = %+v, %v, %d hits; want 3 counted, context.Canceled, 2 hits", result, err, hits(t, db))
+	if result != (Result{Counted: 2}) || !errors.Is(err, context.Canceled) || hits(t, db) != 2 {
+		t.Errorf("stopped Read = %+v, %v, %d hits; want 2 counted, context.Canceled, 2 hits", result, err, hits(t, db))
 	}
 
 	if got := read(t, logReader); got != (Result{Counted: 3}) || hits(t, db) != 5 {
@@ -758,8 +762,9 @@ func TestChunksUnreadable(t *testing.T) {
 	appendLog(t, path, "garbage\ngarbage\ngarbage\n")
 
 	// The checks before the first two lines.
-	if _, err := logReader.Read(&countdown{Context: t.Context(), n: 2}); !errors.Is(err, context.Canceled) {
-		t.Errorf("stopped Read = %v, want context.Canceled", err)
+	result, err := logReader.Read(&countdown{Context: t.Context(), n: 2})
+	if result != (Result{Malformed: 2}) || !errors.Is(err, context.Canceled) {
+		t.Errorf("stopped Read = %+v, %v; want 2 malformed, context.Canceled", result, err)
 	}
 
 	if got := read(t, logReader); got != (Result{Malformed: 1}) {
@@ -777,8 +782,8 @@ func TestChunksLateReadable(t *testing.T) {
 
 	// The checks before the four lines.
 	result, err := logReader.Read(&countdown{Context: t.Context(), n: 4})
-	if result != (Result{Counted: 2, Malformed: 2}) || !errors.Is(err, context.Canceled) || hits(t, db) != 1 {
-		t.Errorf("stopped Read = %+v, %v, %d hits; want 2 counted, 2 malformed, context.Canceled, 1 hit", result, err,
+	if result != (Result{Counted: 1, Malformed: 2}) || !errors.Is(err, context.Canceled) || hits(t, db) != 1 {
+		t.Errorf("stopped Read = %+v, %v, %d hits; want 1 counted, 2 malformed, context.Canceled, 1 hit", result, err,
 			hits(t, db))
 	}
 }
@@ -797,8 +802,8 @@ func TestChunksRotate(t *testing.T) {
 
 	// The checks before the old file's line, its end and the new log's first two lines.
 	result, err := logReader.Read(&countdown{Context: t.Context(), n: 4})
-	if result != (Result{Counted: 3}) || !errors.Is(err, context.Canceled) || hits(t, db) != 3 {
-		t.Errorf("stopped Read = %+v, %v, %d hits; want 3 counted, context.Canceled, 3 hits", result, err, hits(t, db))
+	if result != (Result{Counted: 2}) || !errors.Is(err, context.Canceled) || hits(t, db) != 3 {
+		t.Errorf("stopped Read = %+v, %v, %d hits; want 2 counted, context.Canceled, 3 hits", result, err, hits(t, db))
 	}
 
 	if count := opened(t, path+".1"); count != 0 {
@@ -871,6 +876,36 @@ func TestRotateTwice(t *testing.T) {
 
 	if got := read(t, logReader); got != (Result{Counted: 3}) || hits(t, db) != 4 {
 		t.Errorf("Read after the second rotation = %+v, %d hits; want 3 counted, 4 hits", got, hits(t, db))
+	}
+}
+
+// A read that takes lines flushes them even when it leaves the state as it was, whether or not it flushed a chunk
+// before: a log moved to that gained only a line equal to the last of the log before, and was rotated in its turn.
+func TestRotateSameState(t *testing.T) {
+	for _, lines := range []int{chunk, 1} {
+		db := openStore(t)
+		path := filepath.Join(t.TempDir(), "access.log")
+		writeLog(t, path, gets(0, 1))
+		logReader := reader(t, db, path)
+		logReader.chunk = lines
+		read(t, logReader)
+		rename(t, path, path+".1")
+		writeLog(t, path, "")
+		read(t, logReader)
+		appendLog(t, path, gets(0, 1))
+		rename(t, path+".1", path+".2")
+		rename(t, path, path+".1")
+		writeLog(t, path, "")
+
+		if got := read(t, logReader); got != (Result{Counted: 1}) || hits(t, db) != 2 {
+			t.Errorf("chunks of %d: Read after the second rotation = %+v, %d hits; want 1 counted, 2 hits", lines, got,
+				hits(t, db))
+		}
+
+		want := noLineState(t, 1)
+		if state, _, err := db.State(path); state != want || err != nil {
+			t.Errorf("chunks of %d: state after the second rotation = %+v, %v; want %+v", lines, state, err, want)
+		}
 	}
 }
 
@@ -1022,8 +1057,8 @@ func TestRotateRename(t *testing.T) {
 	}
 }
 
-// While the path names no file, a read fails and keeps the old one; so does a read stopped in the new log. The next
-// read takes what the old file gained, then the new log.
+// After a rotation by rename, while the path names no file, a read fails and keeps the old file; so does a read stopped
+// in the new log. The next read takes what the old file gained, then the new log.
 func TestRotateFailed(t *testing.T) {
 	db := openStore(t)
 	path := filepath.Join(t.TempDir(), "access.log")
@@ -1041,8 +1076,8 @@ func TestRotateFailed(t *testing.T) {
 
 	// The checks before the old file's line, its end and the new log's line.
 	result, err := logReader.Read(&countdown{Context: t.Context(), n: 3})
-	if result != (Result{Counted: 2}) || !errors.Is(err, context.Canceled) {
-		t.Errorf("Read stopped in the new log = %+v, %v; want 2 counted, context.Canceled", result, err)
+	if result != (Result{}) || !errors.Is(err, context.Canceled) {
+		t.Errorf("Read stopped in the new log = %+v, %v; want nothing, context.Canceled", result, err)
 	}
 
 	if got := read(t, logReader); got != (Result{Counted: 2}) || hits(t, db) != 3 {
@@ -1278,35 +1313,30 @@ func corruptStore(t *testing.T, store string, day time.Time) *kvstore.DB {
 	// The key as kvstore lays it out.
 	putRaw(t, store, "agg", "\x02td\x01h"+day.Format("20060102"), []byte{0})
 
-	db, err = kvstore.Open(store, time.Second, "UTC")
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-
-	t.Cleanup(func() { _ = db.Close() })
-
-	return db
+	return openAt(t, store, "UTC")
 }
 
-// A read whose flush fails, of a chunk or at its end, stops there and returns the store's error.
+// A read whose flush fails, of a chunk or at its end, stops there and fails, and its Result counts no line of that
+// flush.
 func TestFlushError(t *testing.T) {
-	for _, tc := range []struct {
-		chunk int
-		want  Result
-	}{
-		{chunk, Result{Counted: 2}},
-		{1, Result{Counted: 1}},
-	} {
+	for _, tc := range []struct{ chunk, told int }{{chunk, 1}, {1, 0}} {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "access.log")
 		db := corruptStore(t, filepath.Join(dir, "kirika.db"), base)
-		writeLog(t, path, gets(0, 2))
-		logReader := reader(t, db, path)
+		writeLog(t, path, gets(0, 1)+ncsa("192.0.2.1", "TRACE", "/", base)+"\n")
+
+		var logged bytes.Buffer
+
+		logReader := debugReader(t, db, path, &logged)
 		logReader.chunk = tc.chunk
 
-		if result, err := logReader.Read(t.Context()); result != tc.want || err == nil {
-			t.Errorf("chunks of %d: Read onto a corrupt store = %+v, %v; want %+v and an error", tc.chunk, result, err,
-				tc.want)
+		if result, err := logReader.Read(t.Context()); result != (Result{}) || err == nil {
+			t.Errorf("chunks of %d: Read onto a corrupt store = %+v, %v; want nothing and an error", tc.chunk, result,
+				err)
+		}
+
+		if told := strings.Count(logged.String(), "line dropped"); told != tc.told {
+			t.Errorf("chunks of %d: %d dropped lines told, want %d", tc.chunk, told, tc.told)
 		}
 	}
 }

@@ -112,6 +112,30 @@ func TestRestartSameLog(t *testing.T) {
 	}
 }
 
+// With nothing gained, a new reader whose state of no line read names a line a rotated file still holds writes nothing
+// to the store.
+func TestRestartWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	store, path := filepath.Join(dir, "kirika.db"), filepath.Join(dir, "access.log")
+	db := openAt(t, store, "UTC")
+	writeLog(t, path, gets(0, 1))
+	readOnce(t, db, path)
+	rename(t, path, path+".1")
+	writeLog(t, path, "")
+	readOnce(t, db, path)
+
+	before, err := os.ReadFile(store)
+	if err != nil {
+		t.Fatalf("read the store: %v", err)
+	}
+
+	readOnce(t, db, path)
+
+	if after, err := os.ReadFile(store); err != nil || !bytes.Equal(before, after) {
+		t.Errorf("a read with nothing gained changed the store's file, or reading it failed: %v", err)
+	}
+}
+
 // A new reader whose log was rotated while none ran takes the rest of the rotated file first, then the new log; its
 // reports of a rotated file's lines name that file and give the line's number in it, and those of the new log's name no
 // file.

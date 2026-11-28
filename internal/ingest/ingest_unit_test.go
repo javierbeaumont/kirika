@@ -93,7 +93,7 @@ func TestNextLong(t *testing.T) {
 	}
 }
 
-// The end of the log is no line, even after a last line with no newline, and a read error is the reader's.
+// The end of the log is no line, even after a last line with no newline, and next returns a failing reader's error.
 func TestNextEnd(t *testing.T) {
 	for _, in := range []string{"", "partial"} {
 		if _, n, more, err := next(bufio.NewReader(strings.NewReader(in)), 0); more || err != nil ||
@@ -108,8 +108,8 @@ func TestNextEnd(t *testing.T) {
 	}
 }
 
-// The methods counted by default are HTTP's but TRACE and CONNECT, PATCH and WebDAV's, in upper case, and each call
-// returns them anew.
+// The methods counted by default are HTTP's but TRACE and CONNECT, PATCH and WebDAV's, in upper case; each call returns
+// them anew, and DefaultOptions holds them with the store's default counting rules.
 func TestDefaultMethods(t *testing.T) {
 	got := DefaultMethods()
 	want := []string{

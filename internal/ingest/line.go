@@ -27,15 +27,15 @@ import (
 	"io"
 )
 
-// The longest line kept, in bytes: longer ones are unreadable, so a file with no newline cannot fill the memory.
+// The longest line kept, in bytes, so a file with no newline cannot fill the memory; longer ones are unreadable.
 const maxLine = 1 << 20
 
 // The text between two newlines of a log, with where it starts and its checksum.
 type line struct {
 	long  bool    // longer than maxLine
 	start int64   // its offset in the log
-	sum   [8]byte // FNV-1a of 64 bits over its text
-	text  []byte  // without its newline and a carriage return before it; nil when long
+	sum   [8]byte // FNV-1a of 64 bits over the line, without its newline and a carriage return before it
+	text  []byte  // what sum covers; nil when long
 }
 
 // Reads the line that starts at offset start. n is the line's length in the log, newline included. more is false at the

@@ -34,7 +34,7 @@ const writeTimeout = 10 * time.Second
 // Options are the limits of a hub's streams.
 type Options struct {
 	Keepalive  time.Duration // how often a stream sends a comment, which keeps a proxy from closing it
-	MaxStreams int           // the streams open at once, past which one is refused
+	MaxStreams int           // the most streams open at once, past which one is refused
 }
 
 // DefaultOptions returns the limits kirika uses when given none.
